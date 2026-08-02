@@ -43,4 +43,15 @@ fn main() {
         call_graph.graph.node_count()
     );
     graph::print_tree(&call_graph);
+
+    println!("\nAnalyzing fund flow...\n");
+    let transfers = match flow::parse_transfers(&raw_trace) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Error parsing transfers: {e}");
+            return;
+        }
+    };
+    let net_flow = flow::compute_net_flow(&transfers);
+    flow::print_flow_summary(&transfers, &net_flow);
 }
