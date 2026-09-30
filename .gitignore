@@ -1,3 +1,6 @@
 /target
 Cargo.lock
 .env
+# Project memory: this repo is public, and AGENTS.md records local environment
+# facts and open threads. Loaded from disk by the agent either way.
+AGENTS.md
