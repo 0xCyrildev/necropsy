@@ -169,3 +169,28 @@ fn a_baseline_endpoint_without_a_baseline_transaction_is_a_usage_error() {
         .code(2)
         .stderr(predicate::str::contains("baseline"));
 }
+
+#[test]
+fn the_narrative_refuses_to_be_combined_with_the_json_report() {
+    // The JSON document carries the tree as data, so a second rendering of it would be
+    // a second thing to keep in sync. The flag says so at parse time instead of
+    // silently producing one of the two.
+    necropsy()
+        .arg("--rpc-url")
+        .arg(DEAD)
+        .arg("--narrative")
+        .arg("--json")
+        .arg(HASH)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--narrative"));
+}
+
+#[test]
+fn the_narrative_flag_is_documented() {
+    necropsy()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--narrative"));
+}

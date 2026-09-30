@@ -71,6 +71,12 @@ struct Args {
     #[arg(long, default_value_t = report::DEFAULT_TREE_LIMIT)]
     tree: usize,
 
+    /// Also print the flat execution narrative: the same frames as a numbered sequence
+    /// naming each call's parent, for reading a story instead of tracing an indent. Text
+    /// report only — `--json` already carries the tree as data, so the two conflict.
+    #[arg(long, conflicts_with = "json")]
+    narrative: bool,
+
     /// Per-request timeout, in seconds.
     #[arg(long, default_value_t = 60)]
     timeout: u64,
@@ -215,7 +221,15 @@ fn run(args: &Args) -> Result<(String, Exit)> {
             .with_diff(comparison.as_ref())
             .to_json()?
     } else {
-        report::text_with(&c, &l, hash, args.tree, comparison.as_ref(), &decimals)
+        report::text_with(
+            &c,
+            &l,
+            hash,
+            args.tree,
+            comparison.as_ref(),
+            &decimals,
+            args.narrative,
+        )
     };
 
     let status = if report::degraded(&c, &l) {

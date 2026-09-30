@@ -144,10 +144,11 @@ impl<'a> Report<'a> {
 pub fn text(c: &Collection, l: &Ledger, hash: TxHash, tree_limit: usize) -> String {
     // An empty `Decimals` knows nothing, which renders what the report rendered before
     // metadata was ever asked for: base units, and a line saying why.
-    text_with(c, l, hash, tree_limit, None, &Decimals::default())
+    text_with(c, l, hash, tree_limit, None, &Decimals::default(), false)
 }
 
-/// As [`text`], with a baseline comparison and the per-asset decimal counts.
+/// As [`text`], with a baseline comparison, per-asset decimal counts, and the optional
+/// flat narrative reading of the tree.
 pub fn text_with(
     c: &Collection,
     l: &Ledger,
@@ -155,6 +156,7 @@ pub fn text_with(
     tree_limit: usize,
     comparison: Option<&Comparison>,
     decimals: &Decimals,
+    narrative: bool,
 ) -> String {
     let mut out = String::new();
     header(c, hash, &mut out);
@@ -167,6 +169,9 @@ pub fn text_with(
     }
     ledger(l, decimals, &mut out);
     tree(&c.trace, tree_limit, &mut out);
+    if narrative {
+        narrative_section(&c.trace, tree_limit, &mut out);
+    }
     events(c, &mut out);
     if let Some(cmp) = comparison {
         diff_section(cmp, &mut out);
@@ -507,6 +512,86 @@ fn reason_suffix(reason: &Option<String>) -> String {
         .as_ref()
         .map(|r| format!(": {r}"))
         .unwrap_or_default()
+}
+
+/// The same tree read as a flat sequence, for a reader who wants the story rather than
+/// the structure.
+///
+/// There is no per-frame clock and this does not pretend otherwise: `callTracer` answers
+/// with nesting and no timestamps, so the order below is *call order*. Receipt logs are a
+/// second, genuinely separate sequence, so they are not interleaved here — the section
+/// ends by pointing at them rather than silently borrowing their order.
+fn narrative_section(t: &Trace, limit: usize, out: &mut String) {
+    let walk = t.root_walk();
+    let shown = if limit == 0 {
+        walk.len()
+    } else {
+        walk.len().min(limit)
+    };
+    out.push_str(&format!(
+        "\nExecution narrative — the same frames as a flat sequence, in call order ({shown} of {} frame(s))\n",
+        walk.len()
+    ));
+    if walk.is_empty() {
+        out.push_str("  (no reachable frames — nothing to narrate; see Call tree above)\n");
+    }
+
+    let mut ordinals: std::collections::BTreeMap<crate::model::FrameId, usize> =
+        std::collections::BTreeMap::new();
+    for (i, id) in walk.iter().enumerate() {
+        ordinals.insert(*id, i + 1);
+    }
+    for (i, id) in walk.iter().enumerate().take(shown) {
+        if let Some(f) = t.frame(*id) {
+            out.push_str(&format!("  {}. {}\n", i + 1, narrative_line(f, &ordinals)));
+        }
+    }
+    if shown < walk.len() {
+        out.push_str(&format!(
+            "  … {} more frame(s) not shown — the tree above and --json carry all {}\n",
+            walk.len() - shown,
+            walk.len()
+        ));
+    }
+    if !t.orphans.is_empty() {
+        out.push_str(&format!(
+            "  {} orphaned frame(s) are absent from this sequence by construction; they are named under Call tree\n",
+            t.orphans.len()
+        ));
+    }
+    out.push_str(
+        "  no per-frame clock exists: callTracer reports nesting, not time. This is call order.\n  Receipt logs are a separate sequence and are not interleaved here.\n",
+    );
+}
+
+fn narrative_line(
+    f: &Frame,
+    ordinals: &std::collections::BTreeMap<crate::model::FrameId, usize>,
+) -> String {
+    let place = match f.parent {
+        None => "root".to_string(),
+        Some(p) => match ordinals.get(&p) {
+            Some(n) => format!("inside {n}"),
+            // A parent outside the walked set must not be drawn as a root.
+            None => "inside an unnumbered frame".to_string(),
+        },
+    };
+    let target = f.to.map(|a| a.short()).unwrap_or_else(|| "—".into());
+    let mut s = format!("{place}: {}→{target} {}", f.from.short(), f.kind.tag());
+    if f.kind.inherits_context() {
+        s.push_str(&format!(" [storage {}]", f.context.short()));
+    }
+    if let Some(sel) = f.selector {
+        s.push_str(&format!(" {}", sel.to_hex()));
+    }
+    match f.value {
+        Some(v) if !v.is_zero() => s.push_str(&format!(" moves {v}")),
+        // The tree's unknown-versus-protocol-zero rule, unchanged.
+        None if !f.kind.cannot_carry_value() => s.push_str(" value ?"),
+        _ => {}
+    }
+    s.push_str(&status_suffix(f));
+    s
 }
 
 fn events(c: &Collection, out: &mut String) {
@@ -1028,7 +1113,15 @@ mod tests {
         let (base, targ) = pair();
         let cmp = crate::diff::compare(TxHash([9u8; 32]), hash(), &base, &targ);
         let l = ledger_of(&targ);
-        let s = text_with(&targ, &l, hash(), 0, Some(&cmp), &Decimals::default());
+        let s = text_with(
+            &targ,
+            &l,
+            hash(),
+            0,
+            Some(&cmp),
+            &Decimals::default(),
+            false,
+        );
         assert!(s.contains("Structural diff against"), "{s}");
         assert!(
             s.contains(&TxHash([9u8; 32]).to_hex()),
@@ -1080,7 +1173,15 @@ mod tests {
         let cmp = crate::diff::compare(TxHash([9u8; 32]), hash(), &base, &targ);
         assert_eq!(cmp.diff.changes.len(), 60);
         let l = ledger_of(&targ);
-        let s = text_with(&targ, &l, hash(), 0, Some(&cmp), &Decimals::default());
+        let s = text_with(
+            &targ,
+            &l,
+            hash(),
+            0,
+            Some(&cmp),
+            &Decimals::default(),
+            false,
+        );
         assert!(
             s.contains(&format!(
                 "{} more difference(s) not shown",
@@ -1140,7 +1241,7 @@ mod tests {
         let c = drained();
         let l = ledger_of(&c);
         let d = decimals_answering("0x06");
-        let s = text_with(&c, &l, hash(), 0, None, &d);
+        let s = text_with(&c, &l, hash(), 0, None, &d, false);
         let rows = ledger_text(&s);
         assert!(rows.contains("(ERC-20, 6 decimals)"), "{rows}");
         // 1000 base units at 6 decimals.
@@ -1160,7 +1261,7 @@ mod tests {
         let c = drained();
         let l = ledger_of(&c);
         let d = decimals_answering("0x");
-        let s = text_with(&c, &l, hash(), 0, None, &d);
+        let s = text_with(&c, &l, hash(), 0, None, &d, false);
         let rows = ledger_text(&s);
         assert!(rows.contains("(ERC-20, decimals unknown)"), "{rows}");
         assert!(!rows.contains("= "), "nothing was scaled: {rows}");
@@ -1178,7 +1279,7 @@ mod tests {
         let c = collection(vec![], tb.finish(), Some(meta()));
         let l = ledger_of(&c);
         // No token asked at all: the 18 comes from the EVM, not from a node.
-        let s = text_with(&c, &l, hash(), 0, None, &Decimals::default());
+        let s = text_with(&c, &l, hash(), 0, None, &Decimals::default(), false);
         let rows = ledger_text(&s);
         assert!(rows.contains("18 decimals, by protocol"), "{rows}");
         assert!(
@@ -1192,7 +1293,7 @@ mod tests {
         let c = drained();
         let l = ledger_of(&c);
         let d = decimals_answering("0xc8");
-        let s = text_with(&c, &l, hash(), 0, None, &d);
+        let s = text_with(&c, &l, hash(), 0, None, &d, false);
         let rows = ledger_text(&s);
         assert!(
             rows.contains("(ERC-20, 200 decimals)"),
@@ -1230,5 +1331,87 @@ mod tests {
             &serde_json::json!(18),
             "a fetched count travels with the rows it explains"
         );
+    }
+
+    /// The narrative section alone. The slice stops at the receipt *table* header (with
+    /// its em dash) because the narrative's own disclaimer mentions receipt logs too.
+    fn narrative_slice(s: &str) -> &str {
+        let start = s
+            .find("Execution narrative")
+            .expect("--narrative was asked for");
+        let end = s.find("Receipt logs —").unwrap_or(s.len());
+        &s[start..end]
+    }
+
+    #[test]
+    fn the_narrative_is_absent_unless_asked_and_flat_when_present() {
+        let c = drained();
+        let l = ledger_of(&c);
+        let plain = text(&c, &l, hash(), 0);
+        assert!(
+            !plain.contains("Execution narrative"),
+            "the default report must not change for anyone who did not ask: {plain}"
+        );
+
+        let s = text_with(&c, &l, hash(), 0, None, &Decimals::default(), true);
+        let section = narrative_slice(&s);
+        assert!(section.contains("1. root:"), "{section}");
+        assert!(
+            section.contains("2. inside 1:"),
+            "the parent is named by the number the reader just saw: {section}"
+        );
+        assert!(section.contains("2 of 2 frame(s)"), "{section}");
+    }
+
+    #[test]
+    fn the_narrative_keeps_the_trees_rule_about_an_unknown_value() {
+        let mut tb = TraceBuilder::new(prov());
+        let root = tb.push(None, frame(CallKind::Call, addr(1), addr(2), 0));
+        tb.push(Some(root), frame(CallKind::StaticCall, addr(2), addr(3), 0));
+        let mut t = tb.finish();
+        // A Call whose value the collector never reported: a gap, and printed as one.
+        t.frames[0].value = None;
+        let c = collection(vec![], t, Some(meta()));
+        let l = ledger_of(&c);
+        let s = text_with(&c, &l, hash(), 0, None, &Decimals::default(), true);
+        let section = narrative_slice(&s);
+        assert!(section.contains("value ?"), "a gap is a gap: {section}");
+        assert_eq!(
+            section.matches("value ?").count(),
+            1,
+            "the staticcall's silence is a protocol answer, not a gap: {section}"
+        );
+    }
+
+    #[test]
+    fn orphaned_frames_are_announced_rather_than_quietly_absent() {
+        let mut tb = TraceBuilder::new(prov());
+        tb.push(None, frame(CallKind::Call, addr(1), addr(2), 0));
+        tb.push(None, frame(CallKind::Call, addr(1), addr(3), 0));
+        let c = collection(vec![], tb.finish(), Some(meta()));
+        let l = ledger_of(&c);
+        let s = text_with(&c, &l, hash(), 0, None, &Decimals::default(), true);
+        assert!(
+            s.contains("1 orphaned frame(s) are absent from this sequence"),
+            "the sequence cannot place them, and says so: {s}"
+        );
+    }
+
+    #[test]
+    fn the_narrative_caps_on_the_same_limit_as_the_tree() {
+        let mut tb = TraceBuilder::new(prov());
+        let root = tb.push(None, frame(CallKind::Call, addr(1), addr(2), 0));
+        for i in 0..30u8 {
+            tb.push(
+                Some(root),
+                frame(CallKind::StaticCall, addr(2), addr(3 + i), 0),
+            );
+        }
+        let c = collection(vec![], tb.finish(), Some(meta()));
+        let l = ledger_of(&c);
+        let s = text_with(&c, &l, hash(), 10, None, &Decimals::default(), true);
+        let section = narrative_slice(&s);
+        assert!(section.contains("10 of 31 frame(s)"), "{section}");
+        assert!(section.contains("21 more frame(s) not shown"), "{section}");
     }
 }

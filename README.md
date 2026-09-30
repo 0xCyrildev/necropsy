@@ -109,6 +109,7 @@ necropsy [OPTIONS] <TX>
   --baseline-rpc-url <URL>  endpoint for the baseline  [default: --rpc-url]
   --json               machine-readable report
   --tree <N>           call-tree lines to print; 0 prints every frame  [default: 200]
+  --narrative          also print a flat execution narrative  [text report only]
   --no-decimals        base units only; do not ask each token for its decimals()
   --timeout <SECONDS>  per-request timeout        [default: 60]
   --verbose            full provider error text (still redacted)
@@ -145,6 +146,13 @@ be reached stays in base units with the reason printed beside it. `0` is a real 
 is scaled as one. Nothing is assumed to be 18 except native ETH, which the protocol defines
 — and `--no-decimals` declines the calls, printing base units and saying that *you* asked
 for that, not that a node refused.
+
+`--narrative` adds a flat, numbered reading of the same frames — each line naming the call
+it sits inside — for a reader who wants a story rather than an indent to trace. It is opt-in
+because the tree is the default answer, and it conflicts with `--json`, which already carries
+the tree as data. It is also explicit about what it does not have: `callTracer` reports
+nesting, not time, so the sequence is *call order*, and the receipt logs stay a separate
+sequence rather than being interleaved with it. Numbering follows the same `--tree` limit.
 
 ## Exit statuses
 
@@ -211,7 +219,7 @@ process, *after* parsing, mid-report.
 ## Tests
 
 ```sh
-cargo test --all-targets   # 143 library + 3 argument-handling + 11 CLI-contract, all offline
+cargo test --all-targets   # 147 library + 3 argument-handling + 13 CLI-contract, all offline
 cargo clippy --all-targets
 ```
 
