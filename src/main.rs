@@ -9,6 +9,7 @@
 
 use clap::{Parser, ValueEnum};
 use necropsy::collect::castbin::{self, CastMode};
+use necropsy::collect::decimals::Decimals;
 use necropsy::collect::rpc::HttpRpc;
 use necropsy::collect::{self, CollectorChoice};
 use necropsy::error::{Error, Redactor, Result};
@@ -59,6 +60,12 @@ struct Args {
     /// Emit the machine-readable report instead of the text one.
     #[arg(long)]
     json: bool,
+
+    /// Do not ask each token for its decimal count; print base units only. This saves
+    /// one `eth_call` per token, which matters on a node without archive state — where
+    /// the calls would fail anyway and every amount would stay in base units regardless.
+    #[arg(long)]
+    no_decimals: bool,
 
     /// Call-tree lines to print; 0 prints every frame.
     #[arg(long, default_value_t = report::DEFAULT_TREE_LIMIT)]
@@ -187,12 +194,28 @@ fn run(args: &Args) -> Result<(String, Exit)> {
         None => None,
     };
 
+    // Asked last, once every guard has passed: the ledger is what says which assets are
+    // worth asking about, and a run that stops on a wrong chain should not have spent
+    // token calls on the way.
+    let decimals = if args.no_decimals {
+        Decimals::unscaled(
+            "--no-decimals was given, so amounts stay in base units and no token was asked",
+        )
+    } else {
+        collect::decimals::fetch(
+            &*rpc,
+            &l.assets(),
+            c.tx.as_ref().map(|m| m.block_tag()).as_deref(),
+        )
+    };
+
     let body = if args.json {
         report::Report::build(&c, &l, hash)
+            .with_decimals((!args.no_decimals).then_some(&decimals))
             .with_diff(comparison.as_ref())
             .to_json()?
     } else {
-        report::text_with(&c, &l, hash, args.tree, comparison.as_ref())
+        report::text_with(&c, &l, hash, args.tree, comparison.as_ref(), &decimals)
     };
 
     let status = if report::degraded(&c, &l) {

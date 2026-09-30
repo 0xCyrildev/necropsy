@@ -55,10 +55,11 @@ Accounting
   coverage    logs 1 (0 unaccounted) | fungible events 1
 
 Value ledger — largest net receiver first, per asset
-  0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 (ERC-20)
-        +316820726  0xCFFAd3200574698b78f32232aa9D63eABD290703   (316820726 in / 0 out)
+  0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 (ERC-20, 6 decimals)
+        +316820726  = 316.820726  0xCFFAd3200574698b78f32232aa9D63eABD290703   (316820726 in / 0 out)
   coverage: 2 asset row(s)
-  amounts are base units — necropsy does not fetch decimals
+  base units first; "= n" is the same amount scaled by that token's own decimals()
+  counts read from the chain at this transaction's block; native ETH is 18 by protocol
 
 Call tree — execution order (2 of 2 frame(s), --tree 0 prints all)
   #0 call 0xFACf…F241→0xA0b8…eB48 0xa9059cbb gas 43725
@@ -108,6 +109,7 @@ necropsy [OPTIONS] <TX>
   --baseline-rpc-url <URL>  endpoint for the baseline  [default: --rpc-url]
   --json               machine-readable report
   --tree <N>           call-tree lines to print; 0 prints every frame  [default: 200]
+  --no-decimals        base units only; do not ask each token for its decimals()
   --timeout <SECONDS>  per-request timeout        [default: 60]
   --verbose            full provider error text (still redacted)
 ```
@@ -134,6 +136,15 @@ a run asked for chain 1 stops if the baseline node answers 8453, because compari
 chain's tree against another's is exactly the mix-up the flag exists to prevent. Without
 `--chain` the comparison still runs, and the report states that the two chains differ
 rather than leaving that for the reader to notice.
+
+Token decimal counts come from one `eth_call` per distinct token, at the transaction's own
+block tag — never `latest`, because metadata read from a later state describes a different
+world, and never batched, because these endpoints refuse batches whose members each work
+alone. A token that reverts the view call, answers something wider than one byte, or cannot
+be reached stays in base units with the reason printed beside it. `0` is a real answer and
+is scaled as one. Nothing is assumed to be 18 except native ETH, which the protocol defines
+— and `--no-decimals` declines the calls, printing base units and saying that *you* asked
+for that, not that a node refused.
 
 ## Exit statuses
 
@@ -183,9 +194,12 @@ process, *after* parsing, mid-report.
 - **No ABI decoding.** Frames carry the 4-byte selector and nothing else, so
   *who controls a value* — the question that separates an exploit from an
   ordinary swap — is deliberately unanswerable here and is not claimed.
-- **No decimals.** Amounts are base units. Scaling needs a `decimals()` call per
-  token; `format_units` exists for a caller that already knows the answer, and the
-  report says base units rather than assuming 18.
+- **No symbols, no prices.** Every token is asked for its `decimals()` at the block the
+  transaction was mined in — a fact the token publishes — so `= 316.820726` is exact, and
+  it is shown *beside* the base amount rather than in place of it. The report does not
+  call `symbol()`, never names a ticker, and prices nothing: a decimal count is a fact
+  about a token, a worth is not. Scaling is display-only; netting and comparison stay on
+  base-unit integers, so a 6-decimal stablecoin is still never added to an 18-decimal one.
 - **No findings, no severity, no price.** There is no ranking of "is this an
   attack" and no USD figures, so a report cannot imply that a drain was worth more
   than a transfer because its token had more decimals.
@@ -197,7 +211,7 @@ process, *after* parsing, mid-report.
 ## Tests
 
 ```sh
-cargo test --all-targets   # 126 library + 3 argument-handling + 11 CLI-contract, all offline
+cargo test --all-targets   # 143 library + 3 argument-handling + 11 CLI-contract, all offline
 cargo clippy --all-targets
 ```
 

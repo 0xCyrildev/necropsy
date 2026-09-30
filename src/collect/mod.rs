@@ -10,6 +10,7 @@
 pub mod calltracer;
 pub mod castbin;
 pub mod casttext;
+pub mod decimals;
 pub mod receiptlogs;
 pub mod rpc;
 pub mod txdata;

@@ -13,12 +13,13 @@
 //!     zero render differently, because they mean different things.
 
 use crate::collect::Collection;
+use crate::collect::decimals::{self, Decimals};
 use crate::collect::txdata::{TxMeta, TxStatus};
 use crate::diff::{ChangeKind, Comparison, Signature};
 use crate::ledger::Ledger;
 use crate::model::{
     AssetId, Frame, FrameStatus, Net, Provenance, TokenEvent, Topic32, Trace, TxHash,
-    UnclassifiedLine,
+    UnclassifiedLine, format_units,
 };
 use serde::Serialize;
 
@@ -65,6 +66,11 @@ pub struct Report<'a> {
     pub trace: &'a Trace,
     pub events: &'a [TokenEvent],
     pub ledger: &'a Ledger,
+    /// Per-asset decimal counts, present only when tokens were asked. A consumer that
+    /// scales amounts needs this alongside the base-unit rows; an empty map would not
+    /// distinguish "not asked" from "asked and refused".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decimals: Option<&'a Decimals>,
     /// Present only when a baseline transaction was supplied. Absent does not mean
     /// "identical to everything" — it means nothing was compared.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -110,9 +116,16 @@ impl<'a> Report<'a> {
             trace: &c.trace,
             events: &c.events,
             ledger: l,
+            decimals: None,
             diff: None,
             notes: &c.notes,
         }
+    }
+
+    /// Attach the fetched decimal counts. `None` when nothing was asked.
+    pub fn with_decimals(mut self, d: Option<&'a Decimals>) -> Self {
+        self.decimals = d;
+        self
     }
 
     /// Attach the baseline comparison. Separate from `build` so the ordinary single
@@ -129,16 +142,19 @@ impl<'a> Report<'a> {
 
 /// Render the text report. `tree_limit` of `0` prints every frame.
 pub fn text(c: &Collection, l: &Ledger, hash: TxHash, tree_limit: usize) -> String {
-    text_with(c, l, hash, tree_limit, None)
+    // An empty `Decimals` knows nothing, which renders what the report rendered before
+    // metadata was ever asked for: base units, and a line saying why.
+    text_with(c, l, hash, tree_limit, None, &Decimals::default())
 }
 
-/// As [`text`], with a baseline comparison rendered before the caveats.
+/// As [`text`], with a baseline comparison and the per-asset decimal counts.
 pub fn text_with(
     c: &Collection,
     l: &Ledger,
     hash: TxHash,
     tree_limit: usize,
     comparison: Option<&Comparison>,
+    decimals: &Decimals,
 ) -> String {
     let mut out = String::new();
     header(c, hash, &mut out);
@@ -149,7 +165,7 @@ pub fn text_with(
              *** not a movement that committed on chain.\n",
         );
     }
-    ledger(l, &mut out);
+    ledger(l, decimals, &mut out);
     tree(&c.trace, tree_limit, &mut out);
     events(c, &mut out);
     if let Some(cmp) = comparison {
@@ -280,13 +296,13 @@ fn describe_unclassified(u: &UnclassifiedLine) -> String {
     format!("line {} {preview:?} — {}", u.line, u.why)
 }
 
-fn ledger(l: &Ledger, out: &mut String) {
+fn ledger(l: &Ledger, d: &Decimals, out: &mut String) {
     out.push_str("\nValue ledger — largest net receiver first, per asset\n");
     if l.is_empty() {
         out.push_str("  (no rows: nothing netted in any asset)\n");
     }
     for asset in l.assets() {
-        out.push_str(&format!("  {}\n", asset_line(&asset)));
+        out.push_str(&format!("  {}\n", asset_line(asset, d)));
         let receivers = l.receivers(asset);
         if receivers.is_empty() {
             out.push_str(
@@ -294,11 +310,24 @@ fn ledger(l: &Ledger, out: &mut String) {
             );
             continue;
         }
+        // The base amount is the number that is exact and comparable; the scaled one is
+        // appended rather than substituted, so a reader can always get back to the
+        // integer the chain actually moved.
+        let digits = digits_for(asset, d);
         for (addr, net) in receivers.iter().take(RECEIVER_LIMIT) {
             let (inflow, outflow) = l.in_out(asset, *addr);
+            let scaled = match (digits, *net) {
+                (Some(dp), Net::Positive(a)) => format_units(&a.to_decimal_string(), dp),
+                (Some(dp), Net::Negative(a)) => {
+                    format_units(&a.to_decimal_string(), dp).map(|s| format!("-{s}"))
+                }
+                (Some(_), Net::Zero) => Some("0".to_string()),
+                _ => None,
+            };
             out.push_str(&format!(
-                "    {:>14}  {}   ({} in / {} out)\n",
+                "    {:>14}{}  {}   ({} in / {} out)\n",
                 format_net(*net),
+                scaled.map(|s| format!("  = {s}")).unwrap_or_default(),
                 addr.to_checksum(),
                 inflow,
                 outflow
@@ -312,13 +341,67 @@ fn ledger(l: &Ledger, out: &mut String) {
         }
     }
     out.push_str(&format!("  coverage: {}\n", l.coverage_sentence()));
-    out.push_str("  amounts are base units — necropsy does not fetch decimals\n");
+    scaling_note(l, d, out);
 }
 
-fn asset_line(asset: &AssetId) -> String {
+/// The decimal count the renderer can actually use.
+///
+/// A token is free to answer `decimals()` with something `format_units` cannot build an
+/// exponent for. That is still a fetched fact and still printed on the asset line — it
+/// simply does not produce a scaled number, and the footer says so rather than staying
+/// quiet.
+fn digits_for(asset: AssetId, d: &Decimals) -> Option<u8> {
+    let dp = d.scaled(asset)?;
+    format_units("1", dp).map(|_| dp)
+}
+
+/// What the amounts on this page are denominated in, and what was asked to know that.
+///
+/// Two different silences must not look the same: a node that refused, and an operator
+/// who asked for base units.
+fn scaling_note(l: &Ledger, d: &Decimals, out: &mut String) {
+    let assets = l.assets();
+    let scaled = assets
+        .iter()
+        .filter(|a| digits_for(**a, d).is_some())
+        .count();
+    if scaled > 0 {
+        out.push_str(
+            "  base units first; \"= n\" is the same amount scaled by that token's own decimals()\n  counts read from the chain at this transaction's block; native ETH is 18 by protocol\n",
+        );
+    }
+    let unanswered = assets.iter().filter(|a| d.scaled(**a).is_none()).count();
+    let unusable = assets
+        .iter()
+        .filter(|a| d.scaled(**a).is_some() && digits_for(**a, d).is_none())
+        .count();
+    if unanswered > 0 {
+        out.push_str(&format!(
+            "  {unanswered} asset(s) are base units only — no decimal count was obtained\n"
+        ));
+        for reason in d.reasons() {
+            out.push_str(&format!("    ! {reason}\n"));
+        }
+    }
+    if unusable > 0 {
+        out.push_str(&format!(
+            "  {unusable} asset(s) answered a decimal count too large to scale; base units shown\n"
+        ));
+    }
+}
+
+/// The asset heading, which now carries the token's own answer. `by protocol` is spelled
+/// out for ETH because every other number on this line was obtained from a node.
+fn asset_line(asset: AssetId, d: &Decimals) -> String {
     match asset {
-        AssetId::Native => "native ETH".to_string(),
-        AssetId::Erc20(a) => format!("{} (ERC-20)", a.to_checksum()),
+        AssetId::Native => format!(
+            "native ETH ({} decimals, by protocol)",
+            decimals::NATIVE_DECIMALS
+        ),
+        AssetId::Erc20(a) => match d.scaled(asset) {
+            Some(dp) => format!("{} (ERC-20, {dp} decimals)", a.to_checksum()),
+            None => format!("{} (ERC-20, decimals unknown)", a.to_checksum()),
+        },
     }
 }
 
@@ -945,7 +1028,7 @@ mod tests {
         let (base, targ) = pair();
         let cmp = crate::diff::compare(TxHash([9u8; 32]), hash(), &base, &targ);
         let l = ledger_of(&targ);
-        let s = text_with(&targ, &l, hash(), 0, Some(&cmp));
+        let s = text_with(&targ, &l, hash(), 0, Some(&cmp), &Decimals::default());
         assert!(s.contains("Structural diff against"), "{s}");
         assert!(
             s.contains(&TxHash([9u8; 32]).to_hex()),
@@ -997,7 +1080,7 @@ mod tests {
         let cmp = crate::diff::compare(TxHash([9u8; 32]), hash(), &base, &targ);
         assert_eq!(cmp.diff.changes.len(), 60);
         let l = ledger_of(&targ);
-        let s = text_with(&targ, &l, hash(), 0, Some(&cmp));
+        let s = text_with(&targ, &l, hash(), 0, Some(&cmp), &Decimals::default());
         assert!(
             s.contains(&format!(
                 "{} more difference(s) not shown",
@@ -1031,5 +1114,121 @@ mod tests {
             "the flattened Diff keeps its own keys: {v}"
         );
         assert!(v["diff"]["caveats"].is_array());
+    }
+
+    /// The Value ledger section alone. Assertions here cannot be made against the whole
+    /// report: the accounting block prints `total 2 = frames 2 + …`, which contains the
+    /// same characters a scaled amount is marked with.
+    fn ledger_text(s: &str) -> &str {
+        let start = s
+            .find("Value ledger")
+            .expect("the ledger is always printed");
+        let end = s.find("Call tree").unwrap_or(s.len());
+        &s[start..end]
+    }
+
+    /// A canned `eth_call` answer for every token in the ledger. `MemoryRpc` keys by
+    /// method, so one answer stands in for all of them — enough to exercise the
+    /// renderer, which is what these tests are about.
+    fn decimals_answering(hex: &str) -> Decimals {
+        let rpc = crate::collect::rpc::MemoryRpc::new([("eth_call", serde_json::json!(hex))]);
+        decimals::fetch(&rpc, &[AssetId::token(addr(0x20))], Some("0x14bcb7f"))
+    }
+
+    #[test]
+    fn a_fetched_decimal_count_scales_the_receiver_row_without_replacing_it() {
+        let c = drained();
+        let l = ledger_of(&c);
+        let d = decimals_answering("0x06");
+        let s = text_with(&c, &l, hash(), 0, None, &d);
+        let rows = ledger_text(&s);
+        assert!(rows.contains("(ERC-20, 6 decimals)"), "{rows}");
+        // 1000 base units at 6 decimals.
+        assert!(
+            rows.contains("= 0.001"),
+            "the scaled value is shown: {rows}"
+        );
+        assert!(
+            rows.contains("+1000"),
+            "and the exact base amount stays: {rows}"
+        );
+        assert!(s.contains("base units first"), "{s}");
+    }
+
+    #[test]
+    fn an_unanswered_token_stays_base_units_and_says_which_one_and_why() {
+        let c = drained();
+        let l = ledger_of(&c);
+        let d = decimals_answering("0x");
+        let s = text_with(&c, &l, hash(), 0, None, &d);
+        let rows = ledger_text(&s);
+        assert!(rows.contains("(ERC-20, decimals unknown)"), "{rows}");
+        assert!(!rows.contains("= "), "nothing was scaled: {rows}");
+        assert!(s.contains("1 asset(s) are base units only"), "{s}");
+        assert!(
+            s.contains("reverts"),
+            "the reason travels with the count: {s}"
+        );
+    }
+
+    #[test]
+    fn native_eth_is_scaled_by_a_protocol_fact_and_labelled_as_one() {
+        let mut tb = TraceBuilder::new(prov());
+        tb.push(None, frame(CallKind::Call, addr(1), addr(2), 5));
+        let c = collection(vec![], tb.finish(), Some(meta()));
+        let l = ledger_of(&c);
+        // No token asked at all: the 18 comes from the EVM, not from a node.
+        let s = text_with(&c, &l, hash(), 0, None, &Decimals::default());
+        let rows = ledger_text(&s);
+        assert!(rows.contains("18 decimals, by protocol"), "{rows}");
+        assert!(
+            rows.contains("= 0.000000000000000005"),
+            "5 wei is 5e-18 ETH, exactly: {rows}"
+        );
+    }
+
+    #[test]
+    fn a_count_too_large_to_scale_is_still_reported_as_the_answer_it_was() {
+        let c = drained();
+        let l = ledger_of(&c);
+        let d = decimals_answering("0xc8");
+        let s = text_with(&c, &l, hash(), 0, None, &d);
+        let rows = ledger_text(&s);
+        assert!(
+            rows.contains("(ERC-20, 200 decimals)"),
+            "the fetched fact is not discarded because it is inconvenient: {rows}"
+        );
+        assert!(s.contains("too large to scale"), "{s}");
+        assert!(
+            !rows.contains("= "),
+            "but no scaled number is invented: {rows}"
+        );
+    }
+
+    #[test]
+    fn json_omits_decimals_when_no_token_was_asked() {
+        let c = drained();
+        let l = ledger_of(&c);
+        let plain: serde_json::Value =
+            serde_json::from_str(&Report::build(&c, &l, hash()).to_json().unwrap()).unwrap();
+        assert!(plain.get("decimals").is_none(), "{plain}");
+
+        let d = decimals_answering("0x12");
+        let v: serde_json::Value = serde_json::from_str(
+            &Report::build(&c, &l, hash())
+                .with_decimals(Some(&d))
+                .to_json()
+                .unwrap(),
+        )
+        .unwrap();
+        let obj = v["decimals"]
+            .as_object()
+            .expect("an object of token → count");
+        assert_eq!(obj.len(), 1, "{v}");
+        assert_eq!(
+            obj.values().next().unwrap(),
+            &serde_json::json!(18),
+            "a fetched count travels with the rows it explains"
+        );
     }
 }
