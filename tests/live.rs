@@ -1,24 +1,31 @@
-//! Live endpoint contract — **opt-in and `#[ignore]`d**, so `cargo test --all-targets` and CI never dial
-//! a node. These encode the checks that were, until now, manual: run once by hand, reported in prose, and
-//! gone. An endpoint-only regression — a `debug_` namespace that disappears, a refusal that reads like
-//! absent evidence, a token that stops answering `decimals()` — used to be caught by nobody until someone
-//! thought to look.
+//! Live endpoint contract — **opt-in and `#[ignore]`d**, so `cargo test --all-targets` and the ordinary
+//! CI job never dial a node. These encode the checks that were, until now, manual: run once by hand,
+//! reported in prose, and gone. An endpoint-only regression — a `debug_` namespace that disappears, a
+//! collector that starts disagreeing with the other, an amount that stops being a string — used to be
+//! caught by nobody until someone thought to look.
 //!
 //! ```sh
 //! NECROPSY_LIVE_URL=https://eth.drpc.org cargo test --test live -- --ignored --nocapture
 //! ```
 //!
-//! `NECROPSY_LIVE_TX` overrides which transaction is examined. It defaults to the one documented in the
-//! README, because that one has a known shape: two frames, one receipt log, an ERC-20 with 6 decimals, and
-//! a `#293`-style global log index that is nowhere near the frame count — the standing proof that the tree
-//! and the receipt logs must not be joined positionally.
+//! `NECROPSY_LIVE_TX` overrides which transaction is examined; empty means "use the default". The
+//! default is the transaction documented in the README, because its shape is known: two frames, one
+//! receipt log, an ERC-20 with 6 decimals, and a global log index nowhere near the frame count — the
+//! standing proof that the tree and the receipt logs must not be joined positionally. Point it at
+//! another chain and the assertions about *this* transaction's shape stop meaning anything.
 //!
-//! A failure here is not automatically a defect in necropsy: a public endpoint can rate-limit, shed, or
-//! change namespace support between two runs. Read the message before believing the red.
+//! ## What a red run means here, and what it does not
+//!
+//! Reading is separated from judging. **Exit 3 — "nothing could be read" — skips rather than failing:**
+//! a rate limit, a node that dropped its `debug_` namespace, or a pruned endpoint that no longer holds
+//! the transaction are facts about the environment, and letting them fail the job would train whoever
+//! reads the result to ignore it. What these tests do fail on is the *content* of a report that was
+//! successfully read, because that is the surface a regression in necropsy actually moves. A usage
+//! error (exit 2) is never excused — the command line is ours to get right.
 
 use assert_cmd::Command;
-use predicates::prelude::*;
 use serde_json::Value;
+use std::process::Output;
 
 const DEFAULT_TX: &str = "0x5b515946dc1177149f140777ac90879312b182117e3392e8e2703ed3cd697153";
 
@@ -42,6 +49,40 @@ fn necropsy() -> Command {
     c
 }
 
+fn run(url: &str, extra: &[&str], tx: &str) -> Output {
+    let mut c = necropsy();
+    c.arg("--rpc-url").arg(url);
+    c.args(extra);
+    c.arg(tx);
+    c.output().expect("the binary runs")
+}
+
+/// The report if the endpoint gave one; `None` after naming why it could not.
+fn read(url: &str, extra: &[&str], tx: &str) -> Option<Output> {
+    let out = run(url, extra, tx);
+    match out.status.code() {
+        Some(0) => Some(out),
+        Some(3) => {
+            let why = String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .next()
+                .unwrap_or("(no message)")
+                .to_string();
+            eprintln!("SKIPPED — environment, not a defect: the endpoint could not be read: {why}");
+            None
+        }
+        Some(c) => panic!(
+            "unexpected exit {c} (a usage error is ours, never the node's): {}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        None => panic!("the process was terminated by a signal"),
+    }
+}
+
+fn text_of(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 macro_rules! skipped {
     () => {{
         eprintln!("SKIPPED: set NECROPSY_LIVE_URL to a reachable endpoint with a debug_ namespace");
@@ -53,20 +94,14 @@ macro_rules! skipped {
 #[ignore = "dials a live endpoint; run with: cargo test --test live -- --ignored"]
 fn live_report_accounts_for_every_input_line() {
     let Some((url, tx)) = live() else { skipped!() };
-    let out = necropsy()
-        .arg("--rpc-url")
-        .arg(&url)
-        .arg(&tx)
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let text = String::from_utf8_lossy(&out);
+    let Some(out) = read(&url, &[], &tx) else {
+        return;
+    };
+    let text = text_of(&out);
     assert!(text.contains("Call tree"), "no tree was rendered: {text}");
     assert!(
         text.contains("balances    yes"),
-        "line conservation did not balance — the report should be marked suspect:\n{text}"
+        "line conservation did not balance, so the report must say so:\n{text}"
     );
     assert!(!text.contains("treat this report as suspect"), "{text}");
     assert!(
@@ -79,17 +114,10 @@ fn live_report_accounts_for_every_input_line() {
 #[ignore = "dials a live endpoint"]
 fn live_json_is_a_consumable_document_with_string_amounts() {
     let Some((url, tx)) = live() else { skipped!() };
-    let out = necropsy()
-        .arg("--rpc-url")
-        .arg(&url)
-        .arg("--json")
-        .arg(&tx)
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let doc: Value = serde_json::from_slice(&out).expect("--json must parse");
+    let Some(out) = read(&url, &["--json"], &tx) else {
+        return;
+    };
+    let doc: Value = serde_json::from_slice(&out.stdout).expect("--json must parse");
     for key in [
         "tool",
         "version",
@@ -111,8 +139,8 @@ fn live_json_is_a_consumable_document_with_string_amounts() {
         "a value-moving tx produced no ledger rows: {doc}"
     );
     for row in rows.iter().take(3) {
-        // 256-bit amounts leave the tool as strings. A JSON number silently loses precision past 2^53, and
-        // a consumer that re-adds the lost digits gets a confident wrong number.
+        // 256-bit amounts leave the tool as strings. A JSON number loses precision past 2^53, and a
+        // consumer that re-adds the lost digits gets a confident wrong number.
         for field in ["inflow", "outflow", "net"] {
             assert!(
                 row[field].is_string(),
@@ -123,7 +151,7 @@ fn live_json_is_a_consumable_document_with_string_amounts() {
     }
     assert!(
         doc["decimals"].is_object(),
-        "tokens were asked, so the counts must travel with the rows: {doc}"
+        "tokens were asked, so their counts must travel with the rows: {doc}"
     );
 }
 
@@ -131,42 +159,15 @@ fn live_json_is_a_consumable_document_with_string_amounts() {
 #[ignore = "dials a live endpoint twice"]
 fn live_collectors_agree_on_where_the_money_went() {
     let Some((url, tx)) = live() else { skipped!() };
-    let run = |collector: &str| -> Option<Value> {
-        let out = necropsy()
-            .args([
-                "--rpc-url",
-                url.as_str(),
-                "--collector",
-                collector,
-                "--json",
-            ])
-            .arg(&tx)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            eprintln!(
-                "{} collector did not answer: {}",
-                collector,
-                String::from_utf8_lossy(&out.stderr)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-            );
-            return None;
-        }
-        serde_json::from_slice(&out.stdout).ok()
+    let json_for = |collector: &'static str| -> Option<Value> {
+        read(&url, &["--collector", collector, "--json"], &tx)
+            .and_then(|o| serde_json::from_slice(&o.stdout).ok())
     };
-
-    let Some(rpc) = run("rpc") else {
-        eprintln!("SKIPPED: the rpc collector could not read this endpoint");
-        return;
-    };
-    let Some(cast) = run("cast") else {
-        // Not a failure: `cast` needs Foundry installed and a node it can render from. Absence of the
-        // second mechanism is a missing environment, not a wrong answer.
-        eprintln!("SKIPPED: the cast collector was unavailable, so the two could not be compared");
-        return;
-    };
+    // Each side skips on its own if the mechanism is unavailable: `cast` needs Foundry, the rpc
+    // collector needs a debug_ namespace. A missing second mechanism is a thinner comparison, not a
+    // wrong answer, so it must not be allowed to read as a defect.
+    let Some(rpc) = json_for("rpc") else { return };
+    let Some(cast) = json_for("cast") else { return };
 
     assert_eq!(
         rpc["accounting"]["frames_total"], cast["accounting"]["frames_total"],
@@ -182,54 +183,56 @@ fn live_collectors_agree_on_where_the_money_went() {
 #[ignore = "dials a live endpoint"]
 fn live_diff_against_itself_is_called_a_tautology() {
     let Some((url, tx)) = live() else { skipped!() };
-    necropsy()
-        .arg("--rpc-url")
-        .arg(&url)
-        .arg("--baseline-tx-hash")
-        .arg(&tx)
-        .arg(&tx)
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("tautology"))
-        .stdout(predicate::str::contains("structurally identical"));
+    let t = tx.as_str();
+    let Some(out) = read(&url, &["--baseline-tx-hash", t], &tx) else {
+        return;
+    };
+    let text = text_of(&out);
+    assert!(
+        text.contains("tautology"),
+        "a diff against the same hash must be named a tautology, not a match:\n{text}"
+    );
+    assert!(text.contains("structurally identical"), "{text}");
 }
 
 #[test]
 #[ignore = "dials a live endpoint"]
 fn live_chain_guard_stops_a_wrong_chain() {
     let Some((url, tx)) = live() else { skipped!() };
-    // 999999 is not a chain anyone serves; the run must stop rather than price one chain from another.
-    necropsy()
-        .arg("--rpc-url")
-        .arg(&url)
-        .arg("--chain")
-        .arg("999999")
-        .arg(&tx)
-        .assert()
-        .code(3)
-        .stderr(predicate::str::contains("chain"));
+    // Positive control first. Without it a dead endpoint returns exit 3 for its own reasons and the
+    // guard looks like it worked when nothing was ever compared.
+    if read(&url, &[], &tx).is_none() {
+        return;
+    }
+    let out = run(&url, &["--chain", "999999"], &tx);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "--chain must stop the run rather than price one chain from another: {}",
+        text_of(&out)
+    );
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        err.contains("chain"),
+        "the refusal must name the guard: {err}"
+    );
 }
 
 #[test]
 #[ignore = "dials a live endpoint"]
 fn live_declined_decimals_blame_the_operator_not_a_node() {
     let Some((url, tx)) = live() else { skipped!() };
-    let out = necropsy()
-        .args(["--rpc-url", url.as_str(), "--no-decimals"])
-        .arg(&tx)
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let text = String::from_utf8_lossy(&out);
+    let Some(out) = read(&url, &["--no-decimals"], &tx) else {
+        return;
+    };
+    let text = text_of(&out);
     assert!(text.contains("decimals unknown"), "{text}");
     assert!(
         text.contains("--no-decimals was given"),
         "the reason must read as a choice, not a failure:\n{text}"
     );
     assert!(
-        !text.contains("(ERC-20, ") || !text.contains(" decimals)"),
+        !text.contains(" decimals)"),
         "nothing should have been scaled:\n{text}"
     );
 }

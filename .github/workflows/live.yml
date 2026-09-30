@@ -1,0 +1,81 @@
+name: live-endpoint-contract
+
+# The offline job in ci.yml is hermetic on purpose, which means it cannot see an endpoint change:
+# a node that drops its debug_ namespace, a rate limit that starts looking like absent evidence, a
+# collector that stops agreeing with the other. Those were verified by hand and then forgotten, so
+# this job runs the same claims on a schedule. workflow_dispatch exists because "someone remembers"
+# should be one click, not a memory.
+
+on:
+  schedule:
+    - cron: "17 6 * * *" # daily, off the round hour
+  workflow_dispatch: {}
+
+concurrency:
+  group: live-endpoint
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # A public endpoint with no credential, so a fork keeps working with nothing to configure.
+  # Set NECROPSY_LIVE_URL as a repository *secret* to use your own node; GitHub masks secret values
+  # in logs, and neither this workflow nor tests/live.rs ever prints the URL itself.
+  NECROPSY_LIVE_URL: ${{ secrets.NECROPSY_LIVE_URL || 'https://eth.drpc.org' }}
+  # Optional repository *variable* (not a secret) to point the checks at another transaction. Leave
+  # unset to use the one documented in the README, whose shape the assertions are written against.
+  NECROPSY_LIVE_TX: ${{ vars.NECROPSY_LIVE_TX }}
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # A red run is only actionable if it also records whether the node was answering at all. This
+      # distinguishes "necropsy regressed" from "the endpoint moved" without anyone re-running by hand.
+      - name: Endpoint pre-flight
+        run: |
+          chain=$(curl -sS --max-time 30 -X POST "$NECROPSY_LIVE_URL" \
+            -H 'content-type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("result","none"))' 2>/dev/null \
+            || echo "curl-failed")
+          dbg=$(curl -sS --max-time 30 -X POST "$NECROPSY_LIVE_URL" \
+            -H 'content-type: application/json' \
+            -d '{"jsonrpc":"2.0","id":2,"method":"debug_traceTransaction","params":["0x0000000000000000000000000000000000000000000000000000000000000000",{"tracer":"callTracer"}]}' \
+            | python3 -c 'import json,sys; e=json.load(sys.stdin).get("error") or {}; print("absent (-32601)" if e.get("code")==-32601 else "present")' 2>/dev/null \
+            || echo "curl-failed")
+          {
+            echo "## Endpoint pre-flight"
+            echo
+            echo "- \`eth_chainId\` → \`$chain\`"
+            echo "- \`debug_\` namespace → \`$dbg\`"
+            echo
+            echo "The URL is deliberately not printed: it may carry a credential when supplied as a secret."
+            echo
+            echo "The rpc-vs-cast collector agreement **skips** here by design: the runner has no Foundry, and"
+            echo "installing a third-party toolchain on a schedule to satisfy one check is a supply-chain"
+            echo "decision, not a testing one. It runs locally, where \`cast\` exists."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Live contract (one retry — endpoints flake, tools do not)
+        run: |
+          rc=0
+          cargo test --test live -- --ignored --nocapture > live-run.log 2>&1 || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::notice::first attempt failed (rc=$rc); retrying in 60s — one failure against a public endpoint is weak evidence"
+            sleep 60
+            cargo test --test live -- --ignored --nocapture > live-run2.log 2>&1 || rc=$?
+          fi
+          cat live-run*.log
+          {
+            echo "## Live contract result"
+            echo
+            echo '```'
+            grep -hE "^test live_[a-z_]+ \.\.\. (ok|FAILED)" live-run*.log || echo "(no test lines captured)"
+            echo '```'
+            echo
+            grep -hoE "test result: .*" live-run2.log live-run.log 2>/dev/null | tail -1 || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"

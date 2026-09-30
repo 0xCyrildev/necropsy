@@ -248,6 +248,13 @@ transaction**, a self-diff declared a tautology, `--chain` refusing a wrong chai
 transaction. A red here is not automatically a defect — a public endpoint can rate-limit or drop a
 namespace between runs, so read the message before believing it.
 
+`.github/workflows/live.yml` runs those checks daily and on demand, with one retry, and it is written so
+an endpoint problem cannot masquerade as a regression: **exit 3 skips**, and only the content of a report
+that *was* read can fail the job. Each run records the node's chain id and whether it still exposes
+`debug_` before any claim is judged. The rpc-vs-cast agreement skips on the runner — it has no Foundry,
+and installing a third-party toolchain on a schedule to satisfy one check is a supply-chain decision, not
+a testing one — so that particular check runs locally.
+
 ## License
 
 MIT.
