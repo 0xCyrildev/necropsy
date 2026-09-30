@@ -26,6 +26,12 @@ struct Args {
     /// Transaction hash: 0x plus 64 hex digits.
     tx: String,
 
+    /// A second transaction from the same endpoint, to compare the call tree against.
+    /// Structural only: it reports shape differences and compares no amounts, so a
+    /// difference is a question for a reviewer and never changes the exit status.
+    #[arg(long, value_name = "HASH")]
+    baseline_tx_hash: Option<String>,
+
     /// JSON-RPC endpoint. Falls back to ETH_RPC_URL.
     #[arg(long, env = "ETH_RPC_URL")]
     rpc_url: Option<String>,
@@ -118,6 +124,13 @@ fn run(args: &Args) -> Result<(String, Exit)> {
         .filter(|u| !u.is_empty())
         .ok_or(Error::NoRpcUrl)?;
     let hash = necropsy::collect::txdata::parse_tx_hash(&args.tx)?;
+    // Parsed up front, with the target: a typo in the *second* hash should cost a
+    // usage error immediately, not a transaction fetch that then gets thrown away.
+    let baseline_hash = args
+        .baseline_tx_hash
+        .as_deref()
+        .map(necropsy::collect::txdata::parse_tx_hash)
+        .transpose()?;
 
     let timeout = Duration::from_secs(args.timeout.max(1));
     let rpc = std::sync::Arc::new(HttpRpc::new(&url, timeout, 2));
@@ -132,7 +145,12 @@ fn run(args: &Args) -> Result<(String, Exit)> {
         external_identification: false,
     };
 
-    let c = collect::collect(rpc, hash, args.collector.into(), Some(cast_cfg))?;
+    let c = collect::collect(
+        rpc.clone(),
+        hash,
+        args.collector.into(),
+        Some(cast_cfg.clone()),
+    )?;
     let l = ledger::build(&c.events, &c.trace, c.tx.as_ref().and_then(|m| m.status));
 
     if let Some(wanted) = args.chain {
@@ -154,10 +172,25 @@ fn run(args: &Args) -> Result<(String, Exit)> {
         }
     }
 
+    // Read the baseline *after* the chain guard, so an endpoint on the wrong chain
+    // cannot spend a second request before the run stops. Two separate calls, never a
+    // batch: these endpoints refuse batches whose members each work alone, and a
+    // refusal would read exactly like a transaction that does not exist.
+    let comparison = match baseline_hash {
+        Some(bhash) => {
+            let baseline =
+                collect::collect(rpc.clone(), bhash, args.collector.into(), Some(cast_cfg))?;
+            Some(necropsy::diff::compare(bhash, hash, &baseline, &c))
+        }
+        None => None,
+    };
+
     let body = if args.json {
-        report::Report::build(&c, &l, hash).to_json()?
+        report::Report::build(&c, &l, hash)
+            .with_diff(comparison.as_ref())
+            .to_json()?
     } else {
-        report::text(&c, &l, hash, args.tree)
+        report::text_with(&c, &l, hash, args.tree, comparison.as_ref())
     };
 
     let status = if report::degraded(&c, &l) {
@@ -165,7 +198,8 @@ fn run(args: &Args) -> Result<(String, Exit)> {
     } else {
         // A reverted transaction is a complete answer, not a failed run. Naming a
         // finding as one would need a severity model the tool does not have yet,
-        // so `Exit::Findings` is deliberately unreachable from here.
+        // so `Exit::Findings` is deliberately unreachable from here. A non-empty
+        // diff is not a finding either: `comparison` is never consulted below.
         Exit::Ok
     };
 

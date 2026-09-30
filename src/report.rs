@@ -14,6 +14,7 @@
 
 use crate::collect::Collection;
 use crate::collect::txdata::{TxMeta, TxStatus};
+use crate::diff::{ChangeKind, Comparison, Signature};
 use crate::ledger::Ledger;
 use crate::model::{
     AssetId, Frame, FrameStatus, Net, Provenance, TokenEvent, Topic32, Trace, TxHash,
@@ -23,6 +24,10 @@ use serde::Serialize;
 
 /// Tree lines printed before the report says "and more".
 pub const DEFAULT_TREE_LIMIT: usize = 200;
+
+/// Diff rows printed before the tail is collapsed. The JSON report always carries
+/// every row, so a cap here never costs anyone information they can ask for.
+pub const DEFAULT_DIFF_LIMIT: usize = 50;
 
 /// Receivers listed per asset before the tail is collapsed.
 const RECEIVER_LIMIT: usize = 15;
@@ -60,6 +65,10 @@ pub struct Report<'a> {
     pub trace: &'a Trace,
     pub events: &'a [TokenEvent],
     pub ledger: &'a Ledger,
+    /// Present only when a baseline transaction was supplied. Absent does not mean
+    /// "identical to everything" — it means nothing was compared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<&'a Comparison>,
     pub notes: &'a [String],
 }
 
@@ -101,8 +110,16 @@ impl<'a> Report<'a> {
             trace: &c.trace,
             events: &c.events,
             ledger: l,
+            diff: None,
             notes: &c.notes,
         }
+    }
+
+    /// Attach the baseline comparison. Separate from `build` so the ordinary single
+    /// transaction path never has to carry an empty diff through the renderer.
+    pub fn with_diff(mut self, cmp: Option<&'a Comparison>) -> Self {
+        self.diff = cmp;
+        self
     }
 
     pub fn to_json(&self) -> crate::error::Result<String> {
@@ -112,6 +129,17 @@ impl<'a> Report<'a> {
 
 /// Render the text report. `tree_limit` of `0` prints every frame.
 pub fn text(c: &Collection, l: &Ledger, hash: TxHash, tree_limit: usize) -> String {
+    text_with(c, l, hash, tree_limit, None)
+}
+
+/// As [`text`], with a baseline comparison rendered before the caveats.
+pub fn text_with(
+    c: &Collection,
+    l: &Ledger,
+    hash: TxHash,
+    tree_limit: usize,
+    comparison: Option<&Comparison>,
+) -> String {
     let mut out = String::new();
     header(c, hash, &mut out);
     accounting(c, &mut out);
@@ -124,6 +152,9 @@ pub fn text(c: &Collection, l: &Ledger, hash: TxHash, tree_limit: usize) -> Stri
     ledger(l, &mut out);
     tree(&c.trace, tree_limit, &mut out);
     events(c, &mut out);
+    if let Some(cmp) = comparison {
+        diff_section(cmp, &mut out);
+    }
     caveats(c, l, &mut out);
     out
 }
@@ -520,6 +551,69 @@ fn short_topic(t: Topic32) -> String {
     format!("0x{}…", hex::encode(f))
 }
 
+/// The baseline comparison, rendered only when one was asked for.
+///
+/// The counts come first and the rows after them, because the counts are the part a
+/// reader can act on: most rows in a large diff are positions that shifted when a call
+/// was inserted earlier, which `Diff::summary` says in as many words.
+fn diff_section(cmp: &Comparison, out: &mut String) {
+    out.push_str(&format!(
+        "\nStructural diff against {} — shape only; a difference is a question, not a verdict\n",
+        cmp.baseline
+    ));
+    out.push_str(&format!(
+        "  read by: baseline {}, target {}\n",
+        cmp.baseline_collector, cmp.target_collector
+    ));
+    for caveat in &cmp.caveats {
+        out.push_str(&format!("  ! {caveat}\n"));
+    }
+    out.push_str(&format!("  {}\n", cmp.diff.summary()));
+    if cmp.diff.changes.is_empty() {
+        return;
+    }
+    for change in cmp.diff.changes.iter().take(DEFAULT_DIFF_LIMIT) {
+        out.push_str(&format!(
+            "  {}  {}\n",
+            change.path,
+            change_text(change.change)
+        ));
+        if let Some(s) = &change.baseline {
+            out.push_str(&format!("      was  {}\n", signature_text(s)));
+        }
+        if let Some(s) = &change.target {
+            out.push_str(&format!("      now  {}\n", signature_text(s)));
+        }
+    }
+    let hidden = cmp.diff.changes.len().saturating_sub(DEFAULT_DIFF_LIMIT);
+    if hidden > 0 {
+        out.push_str(&format!(
+            "  … {hidden} more difference(s) not shown; --json carries all {}\n",
+            cmp.diff.changes.len()
+        ));
+    }
+}
+
+fn change_text(k: ChangeKind) -> &'static str {
+    match k {
+        ChangeKind::Added => "inserted in the target",
+        ChangeKind::Removed => "absent from the target",
+        ChangeKind::Changed => "different at this position",
+    }
+}
+
+/// One side of a diff row. Deliberately narrower than a tree line: no value, no label,
+/// no gas, because those are exactly the fields `Frame::diff_signature` excludes and
+/// printing them here would invite a reader to compare them.
+fn signature_text(s: &Signature) -> String {
+    let to = s.to.map(|a| a.short()).unwrap_or_else(|| "—".into());
+    let mut t = format!("{} {}→{to}", s.kind, s.from.short());
+    if let Some(sel) = s.selector {
+        t.push_str(&format!(" {}", sel.to_hex()));
+    }
+    t
+}
+
 fn caveats(c: &Collection, l: &Ledger, out: &mut String) {
     let mut items: Vec<String> = c.notes.clone();
     if l.unapplied_events > 0 {
@@ -830,5 +924,112 @@ mod tests {
         let l = ledger_of(&c);
         let s = text(&c, &l, hash(), 0);
         assert!(s.contains("Orphaned frames (1)"), "{s}");
+    }
+
+    /// A child that became a value-bearing call to a different address at the same
+    /// position — the shape a real deviation takes.
+    fn pair() -> (Collection, Collection) {
+        let mut tb = TraceBuilder::new(prov());
+        let root = tb.push(None, frame(CallKind::Call, addr(1), addr(2), 0));
+        tb.push(Some(root), frame(CallKind::StaticCall, addr(2), addr(4), 0));
+        let base = collection(vec![], tb.finish(), Some(meta()));
+
+        let mut tb = TraceBuilder::new(prov());
+        let root = tb.push(None, frame(CallKind::Call, addr(1), addr(2), 0));
+        tb.push(Some(root), frame(CallKind::Call, addr(2), addr(9), 1000));
+        (base, collection(vec![], tb.finish(), Some(meta())))
+    }
+
+    #[test]
+    fn a_requested_baseline_renders_both_sides_of_every_row() {
+        let (base, targ) = pair();
+        let cmp = crate::diff::compare(TxHash([9u8; 32]), hash(), &base, &targ);
+        let l = ledger_of(&targ);
+        let s = text_with(&targ, &l, hash(), 0, Some(&cmp));
+        assert!(s.contains("Structural diff against"), "{s}");
+        assert!(
+            s.contains(&TxHash([9u8; 32]).to_hex()),
+            "the baseline must be named by the hash that was asked for: {s}"
+        );
+        // Slice to the section itself: the ledger above legitimately prints amounts,
+        // so checking the whole report would prove nothing about the diff rows.
+        let section = &s[s.find("Structural diff against").unwrap()..];
+        assert!(
+            section.contains("root/0"),
+            "the position is printed: {section}"
+        );
+        assert!(section.contains("was"), "{section}");
+        assert!(section.contains("now"), "{section}");
+        // The value the signature deliberately excluded must not sneak back in, or the
+        // section invites a reader to compare amounts across the two sides.
+        assert!(
+            !section.contains("1000"),
+            "no amounts in a diff row: {section}"
+        );
+    }
+
+    #[test]
+    fn an_unrequested_baseline_does_not_render_as_a_match() {
+        // The lie this guards: an empty "identical" line where nothing was compared.
+        let c = drained();
+        let l = ledger_of(&c);
+        let s = text(&c, &l, hash(), 0);
+        assert!(
+            !s.contains("Structural diff"),
+            "no baseline asked means no comparison claimed: {s}"
+        );
+    }
+
+    #[test]
+    fn diff_rows_past_the_cap_are_counted_rather_than_lost() {
+        let wide = |side: u8| {
+            let mut tb = TraceBuilder::new(prov());
+            let root = tb.push(None, frame(CallKind::Call, addr(1), addr(2), 0));
+            for _ in 0..60u8 {
+                tb.push(
+                    Some(root),
+                    frame(CallKind::StaticCall, addr(2), addr(side), 0),
+                );
+            }
+            collection(vec![], tb.finish(), Some(meta()))
+        };
+        let (base, targ) = (wide(4), wide(5));
+        let cmp = crate::diff::compare(TxHash([9u8; 32]), hash(), &base, &targ);
+        assert_eq!(cmp.diff.changes.len(), 60);
+        let l = ledger_of(&targ);
+        let s = text_with(&targ, &l, hash(), 0, Some(&cmp));
+        assert!(
+            s.contains(&format!(
+                "{} more difference(s) not shown",
+                60 - DEFAULT_DIFF_LIMIT
+            )),
+            "the suppression is announced: {s}"
+        );
+        assert!(s.contains("carries all 60"), "the total is printed: {s}");
+    }
+
+    #[test]
+    fn json_carries_a_diff_only_when_one_was_computed() {
+        let c = drained();
+        let l = ledger_of(&c);
+        let plain: serde_json::Value =
+            serde_json::from_str(&Report::build(&c, &l, hash()).to_json().unwrap()).unwrap();
+        assert!(
+            plain.get("diff").is_none(),
+            "an absent comparison must not serialize as an empty one: {plain}"
+        );
+
+        let cmp = crate::diff::compare(TxHash([9u8; 32]), hash(), &c, &c);
+        let json = Report::build(&c, &l, hash())
+            .with_diff(Some(&cmp))
+            .to_json()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["diff"]["baseline"], cmp.baseline);
+        assert!(
+            v["diff"]["changes"].is_array(),
+            "the flattened Diff keeps its own keys: {v}"
+        );
+        assert!(v["diff"]["caveats"].is_array());
     }
 }

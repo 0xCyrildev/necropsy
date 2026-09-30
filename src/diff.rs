@@ -17,7 +17,8 @@
 //!     an artifact of one collection, not a location. They are counted and named, never
 //!     paired.
 
-use crate::model::{Address, CallKind, Frame, Selector, Trace};
+use crate::collect::Collection;
+use crate::model::{Address, CallKind, Frame, Selector, Trace, TxHash};
 use serde::{Deserialize, Serialize};
 
 /// What one position holds, in a form two traces can be compared on.
@@ -208,6 +209,75 @@ fn compare_paths(a: &str, b: &str) -> std::cmp::Ordering {
                 }
             }
         }
+    }
+}
+
+/// A `Diff` plus the provenance of the two reads behind it.
+///
+/// A comparison is only as strong as its weakest input, so the result carries which
+/// collector produced each side and names, out loud, the cases where a difference may
+/// be an artifact of how a tree was read rather than a fact about the chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Comparison {
+    /// The baseline hash that was asked for. An argument rather than a response, so it
+    /// is still present when the endpoint said nothing about that transaction.
+    pub baseline: String,
+    pub baseline_collector: String,
+    pub target_collector: String,
+    pub caveats: Vec<String>,
+    #[serde(flatten)]
+    pub diff: Diff,
+}
+
+/// Compare two finished collections.
+///
+/// The two hashes are what the operator asked for, not what the endpoint returned, so a
+/// report can name the transactions it claims to have compared even when one read came
+/// back empty. An empty read makes the comparison weaker; it never makes it a match.
+pub fn compare(
+    baseline_hash: TxHash,
+    target_hash: TxHash,
+    baseline: &Collection,
+    target: &Collection,
+) -> Comparison {
+    let mut caveats = Vec::new();
+
+    if baseline_hash == target_hash {
+        caveats.push(
+            "the baseline and the target are the same transaction, so every position matches by construction — this is a tautology, not a result".into(),
+        );
+    }
+
+    if baseline.trace.provenance.collector != target.trace.provenance.collector {
+        caveats.push(format!(
+            "the two trees were read by different collectors (baseline: {}, target: {}). A remaining difference may be a difference of mechanism rather than of chain",
+            baseline.provenance(),
+            target.provenance()
+        ));
+    }
+
+    match (
+        baseline.trace.provenance.chain_id,
+        target.trace.provenance.chain_id,
+    ) {
+        (Some(b), Some(t)) if b != t => caveats.push(format!(
+            "the endpoint reported chain {b} for the baseline and chain {t} for the target — these are not two runs of one flow"
+        )),
+        // Unknown is not agreement: one side silent about its chain weakens the
+        // comparison, it does not confirm it.
+        (Some(_), None) | (None, Some(_)) => caveats.push(
+            "only one side reported a chain id, so a same-chain comparison could not be confirmed".into(),
+        ),
+        _ => {}
+    }
+
+    Comparison {
+        baseline: baseline_hash.to_hex(),
+        baseline_collector: baseline.provenance().to_string(),
+        target_collector: target.provenance().to_string(),
+        caveats,
+        diff: diff(&baseline.trace, &target.trace),
     }
 }
 
@@ -417,5 +487,103 @@ mod tests {
         let mut b = TraceBuilder::new(prov());
         b.push(None, frame(CallKind::Call, addr(2)));
         b.finish()
+    }
+
+    fn prov_of(collector: Collector, chain_id: Option<u64>) -> Provenance {
+        Provenance {
+            collector,
+            cast_version: None,
+            chain_id,
+            block: None,
+        }
+    }
+
+    /// A one-level tree with the provenance under test, and nothing else.
+    fn coll(collector: Collector, chain_id: Option<u64>) -> Collection {
+        let mut b = TraceBuilder::new(prov_of(collector, chain_id));
+        let root = b.push(None, frame(CallKind::Call, addr(2)));
+        b.push(Some(root), frame(CallKind::StaticCall, addr(3)));
+        Collection {
+            trace: b.finish(),
+            logs: Vec::new(),
+            events: Vec::new(),
+            tx: None,
+            notes: Vec::new(),
+        }
+    }
+
+    fn tx_hash(n: u8) -> TxHash {
+        TxHash([n; 32])
+    }
+
+    /// The positive control for every caveat below: a same-mechanism, same-chain pair
+    /// must add nothing, or the caveats fire on every run and mean nothing.
+    #[test]
+    fn a_clean_pair_carries_no_caveats() {
+        let b = coll(Collector::CallTracerJson, Some(1));
+        let t = coll(Collector::CallTracerJson, Some(1));
+        let c = compare(tx_hash(1), tx_hash(2), &b, &t);
+        assert!(c.caveats.is_empty(), "{:?}", c.caveats);
+        assert!(c.diff.is_empty(), "{:?}", c.diff.changes);
+    }
+
+    #[test]
+    fn comparing_a_transaction_with_itself_is_named_a_tautology() {
+        let b = coll(Collector::CallTracerJson, Some(1));
+        let t = coll(Collector::CallTracerJson, Some(1));
+        let same = tx_hash(9);
+        let c = compare(same, same, &b, &t);
+        assert!(
+            c.caveats.iter().any(|s| s.contains("tautology")),
+            "{:?}",
+            c.caveats
+        );
+    }
+
+    #[test]
+    fn a_mixed_collector_pair_is_flagged_as_weaker() {
+        let b = coll(Collector::CallTracerJson, Some(1));
+        let t = coll(Collector::CastTextRendered, Some(1));
+        let c = compare(tx_hash(1), tx_hash(2), &b, &t);
+        assert!(
+            c.caveats.iter().any(|s| s.contains("different collectors")),
+            "{:?}",
+            c.caveats
+        );
+        assert_eq!(c.target_collector, t.provenance());
+    }
+
+    #[test]
+    fn a_silent_chain_id_is_not_treated_as_agreement() {
+        let b = coll(Collector::CallTracerJson, Some(1));
+        let t = coll(Collector::CallTracerJson, None);
+        let c = compare(tx_hash(1), tx_hash(2), &b, &t);
+        assert!(
+            c.caveats
+                .iter()
+                .any(|s| s.contains("could not be confirmed")),
+            "unknown is not agreement: {:?}",
+            c.caveats
+        );
+    }
+
+    #[test]
+    fn two_different_chains_are_not_two_runs_of_one_flow() {
+        let b = coll(Collector::CallTracerJson, Some(1));
+        let t = coll(Collector::CallTracerJson, Some(10));
+        let c = compare(tx_hash(1), tx_hash(2), &b, &t);
+        assert!(
+            c.caveats.iter().any(|s| s.contains("one flow")),
+            "{:?}",
+            c.caveats
+        );
+    }
+
+    #[test]
+    fn the_comparison_names_the_baseline_that_was_asked_for() {
+        let b = coll(Collector::CallTracerJson, Some(1));
+        let t = coll(Collector::CallTracerJson, Some(1));
+        let c = compare(tx_hash(3), tx_hash(4), &b, &t);
+        assert_eq!(c.baseline, tx_hash(3).to_hex());
     }
 }

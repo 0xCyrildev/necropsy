@@ -112,3 +112,44 @@ fn an_unknown_flag_is_the_same_usage_status_as_a_bad_hash() {
     // caller has one status for "the command was wrong" rather than two.
     necropsy().arg("--not-a-flag").arg(HASH).assert().code(2);
 }
+
+#[test]
+fn a_bad_baseline_hash_is_a_usage_error_that_never_dials_the_endpoint() {
+    // The point of parsing both hashes up front: a typo in the second one is not
+    // allowed to cost a fetch of the first. The endpoint here is a reserved port
+    // nothing serves, so reaching the network would change the status to 3.
+    necropsy()
+        .arg("--rpc-url")
+        .arg(DEAD)
+        .arg("--baseline-tx-hash")
+        .arg("0zzz")
+        .arg(HASH)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("invalid transaction hash"));
+}
+
+#[test]
+fn a_baseline_is_read_from_the_same_endpoint_and_its_absence_is_unavailability() {
+    // Not a usage error: the command was well formed, the node could not answer.
+    necropsy()
+        .arg("--rpc-url")
+        .arg(DEAD)
+        .arg("--baseline-tx-hash")
+        .arg(HASH)
+        .arg(HASH)
+        .assert()
+        .code(3);
+}
+
+#[test]
+fn the_baseline_flag_documents_itself_as_structural() {
+    // The name and the caveat are the interface. A reader who thinks this compares
+    // amounts will over-read the output, so the help text carries the limit.
+    necropsy()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--baseline-tx-hash"))
+        .stdout(predicate::str::contains("Structural only"));
+}
