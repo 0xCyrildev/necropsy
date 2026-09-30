@@ -104,6 +104,7 @@ necropsy [OPTIONS] <TX>
   --chain <ID>         refuse to analyze unless the endpoint agrees this is that chain
   --collector <KIND>   auto | rpc | cast          [default: auto]
   --cast-mode <MODE>   rendered | replay          [default: rendered]
+  --baseline-tx-hash <HASH>  compare the call tree against a second transaction
   --json               machine-readable report
   --tree <N>           call-tree lines to print; 0 prints every frame  [default: 200]
   --timeout <SECONDS>  per-request timeout        [default: 60]
@@ -115,6 +116,16 @@ the node answers JSON-RPC `-32601` (no `debug_` namespace). `--collector rpc`
 refuses to fall back rather than silently changing mechanism, because the two
 collectors report different things. `replay` re-executes the block locally, so its
 numbers are labelled as potentially divergent from chain.
+
+`--baseline-tx-hash` reads a second transaction from the same endpoint and prints a
+**structural** diff: which position holds which call, to whom, with which selector.
+It compares no amounts, no labels and no storage, so a row is a question for a
+reviewer rather than a verdict, and it never changes the exit status. The report says
+out loud when the comparison is weak — the same hash on both sides, two different
+collector mechanisms, or a chain id that only one side reported. Paths are child
+indices, so one inserted call shifts every later position; text prints the first 50
+rows and counts the rest, and `--json` carries all of them under a `diff` key that is
+absent, not empty, when no baseline was asked for.
 
 ## Exit statuses
 
@@ -178,7 +189,7 @@ process, *after* parsing, mid-report.
 ## Tests
 
 ```sh
-cargo test --all-targets   # 105 library + 7 CLI-contract tests, all offline
+cargo test --all-targets   # 123 library + 10 CLI-contract tests, all offline
 cargo clippy --all-targets
 ```
 
