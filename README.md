@@ -232,6 +232,22 @@ exists for that, and prints what the pipeline actually accounted for:
 ETH_RPC_URL=https://eth.drpc.org cargo run --example live_collect -- 0x<tx hash>
 ```
 
+A second tier covers what a hermetic suite structurally cannot see: an endpoint that changes
+underneath the tool. `tests/live.rs` is `#[ignore]`d, so `cargo test` never dials a node — run it
+deliberately, and note the variable is its own, not `ETH_RPC_URL`, which the offline tests actively
+remove so ambient configuration cannot turn them into network calls:
+
+```sh
+NECROPSY_LIVE_URL=https://eth.drpc.org cargo test --test live -- --ignored
+```
+
+Six checks, each one a claim this README makes: every input line accounted for, the JSON document
+consumable with amounts as strings, **both collectors producing the same ledger for one
+transaction**, a self-diff declared a tautology, `--chain` refusing a wrong chain, and
+`--no-decimals` blaming the operator rather than a node. `NECROPSY_LIVE_TX` points them at another
+transaction. A red here is not automatically a defect — a public endpoint can rate-limit or drop a
+namespace between runs, so read the message before believing it.
+
 ## License
 
 MIT.
