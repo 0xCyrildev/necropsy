@@ -70,6 +70,31 @@ impl Collection {
             .filter(|e| matches!(e, TokenEvent::Unclassified { .. }))
             .count()
     }
+
+    /// Refuse to be trusted when the endpoint cannot confirm it is the chain `wanted`.
+    ///
+    /// This lives on the collection rather than in the command line because a baseline
+    /// comparison reads from two endpoints: a guard that only looked at the target would
+    /// price one chain while reading another, which is exactly the mix-up `--chain`
+    /// exists to prevent.
+    ///
+    /// `at` is a redacted host, used only where the failure is silence — "this endpoint
+    /// would not report a chain id" tells the reader nothing if they cannot tell *which*
+    /// endpoint is being discussed.
+    pub fn verify_chain(&self, wanted: u64, at: &str) -> Result<()> {
+        match self.trace.provenance.chain_id {
+            Some(got) if got == wanted => Ok(()),
+            Some(got) => Err(Error::ChainMismatch {
+                endpoint: got,
+                requested: wanted,
+            }),
+            // Silence is not agreement: an endpoint that will not say which chain it is
+            // on cannot honour a guard meant to prevent exactly that mix-up.
+            None => Err(Error::Collect(format!(
+                "the endpoint at {at} would not report a chain id, so --chain {wanted} cannot be verified"
+            ))),
+        }
+    }
 }
 
 /// Collect via RPC: callTracer for the tree, receipt for the value movement.
@@ -274,5 +299,58 @@ mod tests {
         // A local replay can diverge from chain; the report text is the only
         // place that difference can survive to the analyst.
         assert!(format!("{:?}", Collector::CastLocalReplay).contains("CastLocalReplay"));
+    }
+
+    fn collected(chain_id: Option<u64>) -> Collection {
+        let tb = crate::model::TraceBuilder::new(Provenance {
+            collector: Collector::CallTracerJson,
+            cast_version: None,
+            chain_id,
+            block: None,
+        });
+        Collection {
+            trace: tb.finish(),
+            logs: Vec::new(),
+            events: Vec::new(),
+            tx: None,
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_matching_chain_id_passes_the_guard() {
+        assert!(collected(Some(1)).verify_chain(1, "eth.drpc.org").is_ok());
+    }
+
+    #[test]
+    fn a_differing_chain_id_keeps_its_typed_error() {
+        // Exit mapping reads this variant; flattening it into a string would turn a
+        // wrong-chain stop into a generic failure.
+        let e = collected(Some(10))
+            .verify_chain(1, "eth.drpc.org")
+            .unwrap_err();
+        assert!(
+            matches!(
+                e,
+                Error::ChainMismatch {
+                    endpoint: 10,
+                    requested: 1
+                }
+            ),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_silent_endpoint_is_refused_and_named() {
+        let e = collected(None)
+            .verify_chain(1, "other.provider")
+            .unwrap_err();
+        let msg = e.to_string();
+        assert!(
+            msg.contains("other.provider"),
+            "with two endpoints in play, the message has to say which one went silent: {msg}"
+        );
+        assert!(msg.contains("--chain 1"), "{msg}");
     }
 }

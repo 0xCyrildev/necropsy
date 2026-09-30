@@ -105,6 +105,7 @@ necropsy [OPTIONS] <TX>
   --collector <KIND>   auto | rpc | cast          [default: auto]
   --cast-mode <MODE>   rendered | replay          [default: rendered]
   --baseline-tx-hash <HASH>  compare the call tree against a second transaction
+  --baseline-rpc-url <URL>  endpoint for the baseline  [default: --rpc-url]
   --json               machine-readable report
   --tree <N>           call-tree lines to print; 0 prints every frame  [default: 200]
   --timeout <SECONDS>  per-request timeout        [default: 60]
@@ -126,6 +127,13 @@ collector mechanisms, or a chain id that only one side reported. Paths are child
 indices, so one inserted call shifts every later position; text prints the first 50
 rows and counts the rest, and `--json` carries all of them under a `diff` key that is
 absent, not empty, when no baseline was asked for.
+
+`--baseline-rpc-url` reads the baseline from a **different endpoint**: a second provider
+for the same chain, or a deliberate cross-chain pair. `--chain` then guards *both* sides —
+a run asked for chain 1 stops if the baseline node answers 8453, because comparing one
+chain's tree against another's is exactly the mix-up the flag exists to prevent. Without
+`--chain` the comparison still runs, and the report states that the two chains differ
+rather than leaving that for the reader to notice.
 
 ## Exit statuses
 
@@ -189,7 +197,7 @@ process, *after* parsing, mid-report.
 ## Tests
 
 ```sh
-cargo test --all-targets   # 123 library + 10 CLI-contract tests, all offline
+cargo test --all-targets   # 126 library + 3 argument-handling + 11 CLI-contract, all offline
 cargo clippy --all-targets
 ```
 

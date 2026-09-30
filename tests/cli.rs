@@ -153,3 +153,19 @@ fn the_baseline_flag_documents_itself_as_structural() {
         .stdout(predicate::str::contains("--baseline-tx-hash"))
         .stdout(predicate::str::contains("Structural only"));
 }
+
+#[test]
+fn a_baseline_endpoint_without_a_baseline_transaction_is_a_usage_error() {
+    // Naming a second endpoint and no second transaction is a typo, not a mode: it
+    // would silently read the baseline from the first endpoint and answer a different
+    // question than the one the operator meant.
+    necropsy()
+        .arg("--rpc-url")
+        .arg(DEAD)
+        .arg("--baseline-rpc-url")
+        .arg(DEAD)
+        .arg(HASH)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("baseline"));
+}

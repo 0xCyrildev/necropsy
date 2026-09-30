@@ -32,6 +32,12 @@ struct Args {
     #[arg(long, value_name = "HASH")]
     baseline_tx_hash: Option<String>,
 
+    /// Where to read the baseline from. Defaults to `--rpc-url`; set it to compare how
+    /// two providers answer for the same transaction, or one chain against another.
+    /// `--chain` then guards both endpoints, not just this one.
+    #[arg(long, value_name = "URL", requires = "baseline_tx_hash")]
+    baseline_rpc_url: Option<String>,
+
     /// JSON-RPC endpoint. Falls back to ETH_RPC_URL.
     #[arg(long, env = "ETH_RPC_URL")]
     rpc_url: Option<String>,
@@ -133,17 +139,18 @@ fn run(args: &Args) -> Result<(String, Exit)> {
         .transpose()?;
 
     let timeout = Duration::from_secs(args.timeout.max(1));
-    let rpc = std::sync::Arc::new(HttpRpc::new(&url, timeout, 2));
+    let mode = args.cast_mode.into();
+    let (rpc, cast_cfg) = endpoint(&url, timeout, mode);
 
-    // Always supplied, even for `--collector rpc`, because `auto` is the default
-    // and its fallback is the only thing that works on a node without a `debug_`
-    // namespace. Building the config does not run `cast`.
-    let cast_cfg = castbin::CastConfig {
-        rpc_url: url.clone(),
-        timeout: timeout.max(Duration::from_secs(120)),
-        mode: args.cast_mode.into(),
-        external_identification: false,
-    };
+    // A second endpoint is opt-in. Without it the baseline is read from the same node,
+    // and `--chain` stays the single guard it was. Set-but-blank applies here too: an
+    // empty value means "same as --rpc-url", not "dial the empty string".
+    let baseline_url = args
+        .baseline_rpc_url
+        .clone()
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| url.clone());
 
     let c = collect::collect(
         rpc.clone(),
@@ -154,32 +161,27 @@ fn run(args: &Args) -> Result<(String, Exit)> {
     let l = ledger::build(&c.events, &c.trace, c.tx.as_ref().and_then(|m| m.status));
 
     if let Some(wanted) = args.chain {
-        match c.trace.provenance.chain_id {
-            Some(got) if got == wanted => {}
-            Some(got) => {
-                return Err(Error::ChainMismatch {
-                    endpoint: got,
-                    requested: wanted,
-                });
-            }
-            // Silence is not agreement: an endpoint that will not say which chain
-            // it is on cannot honour a guard meant to prevent exactly that mix-up.
-            None => {
-                return Err(Error::Collect(format!(
-                    "this endpoint would not report a chain id, so --chain {wanted} cannot be verified"
-                )));
-            }
-        }
+        c.verify_chain(wanted, &rpc.describe())?;
     }
 
-    // Read the baseline *after* the chain guard, so an endpoint on the wrong chain
-    // cannot spend a second request before the run stops. Two separate calls, never a
-    // batch: these endpoints refuse batches whose members each work alone, and a
+    // Read the baseline *after* the target's chain guard, so an endpoint on the wrong
+    // chain cannot spend a second request before the run stops. Two separate calls,
+    // never a batch: these endpoints refuse batches whose members each work alone, and a
     // refusal would read exactly like a transaction that does not exist.
     let comparison = match baseline_hash {
         Some(bhash) => {
+            let (brpc, bcast) = if baseline_url == url {
+                (rpc.clone(), cast_cfg.clone())
+            } else {
+                endpoint(&baseline_url, timeout, mode)
+            };
             let baseline =
-                collect::collect(rpc.clone(), bhash, args.collector.into(), Some(cast_cfg))?;
+                collect::collect(brpc.clone(), bhash, args.collector.into(), Some(bcast))?;
+            // Guarded on its own terms: with two endpoints, a `--chain` satisfied only
+            // by the target would compare one chain's tree against another chain's.
+            if let Some(wanted) = args.chain {
+                baseline.verify_chain(wanted, &brpc.describe())?;
+            }
             Some(necropsy::diff::compare(bhash, hash, &baseline, &c))
         }
         None => None,
@@ -206,17 +208,113 @@ fn run(args: &Args) -> Result<(String, Exit)> {
     Ok((body, status))
 }
 
+/// One endpoint: an RPC handle, plus the `cast` configuration that makes `auto`'s
+/// fallback possible on a node with no `debug_` namespace. Built twice only when
+/// `--baseline-rpc-url` names a second one; constructing it never runs `cast`.
+fn endpoint(
+    url: &str,
+    timeout: Duration,
+    mode: CastMode,
+) -> (collect::SharedRpc, castbin::CastConfig) {
+    let rpc: collect::SharedRpc = std::sync::Arc::new(HttpRpc::new(url, timeout, 2));
+    let cast = castbin::CastConfig {
+        rpc_url: url.to_string(),
+        // Rendering a trace is not a JSON-RPC round trip; a timeout tuned for the
+        // latter would kill the former.
+        timeout: timeout.max(Duration::from_secs(120)),
+        mode,
+        external_identification: false,
+    };
+    (rpc, cast)
+}
+
 /// An error message that cannot carry a credential, whatever the provider said.
+///
+/// Both endpoints are redacted. A baseline read from a different URL can fail with its
+/// own key in the provider's text, and one URL's redactor knows nothing about the other.
 fn message(args: &Args, e: &Error) -> String {
-    match args.rpc_url.as_deref() {
-        Some(url) => {
-            let r = Redactor::from_url(url);
-            if args.verbose {
-                r.redact(&e.to_string())
-            } else {
-                r.first_line(&e.to_string())
-            }
-        }
-        None => e.to_string(),
+    let urls = [args.rpc_url.as_deref(), args.baseline_rpc_url.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .collect::<Vec<_>>();
+    let Some(first) = urls.first() else {
+        return e.to_string();
+    };
+    let mut text = e.to_string();
+    for url in &urls {
+        text = Redactor::from_url(url).redact(&text);
+    }
+    if args.verbose {
+        text
+    } else {
+        // `first_line` is formatting only — the redaction above already happened.
+        Redactor::from_url(first).first_line(&text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TX: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn args(argv: &[&str]) -> Args {
+        // `tx` is the one required positional; every fixture here is a full command.
+        Args::parse_from(std::iter::once("necropsy").chain(argv.iter().copied()))
+    }
+
+    /// The property this exists to hold: no path through the error printer may let a
+    /// credential through, whichever endpoint it belonged to.
+    #[test]
+    fn a_credential_in_either_endpoint_url_is_redacted() {
+        let a = args(&[
+            "--rpc-url",
+            "https://eth.example/v2/targetkey1234567890",
+            "--baseline-rpc-url",
+            "https://base.example/v2/baselinekey0987654321",
+            "--baseline-tx-hash",
+            TX,
+            TX,
+        ]);
+        let e = Error::Rpc("dial https://base.example/v2/baselinekey0987654321 failed".into());
+        let msg = message(&a, &e);
+        assert!(
+            !msg.contains("baselinekey0987654321"),
+            "the baseline URL is a secret too: {msg}"
+        );
+        let e2 = Error::Rpc("dial https://eth.example/v2/targetkey1234567890 failed".into());
+        assert!(
+            !message(&a, &e2).contains("targetkey1234567890"),
+            "the target URL is still redacted: {}",
+            message(&a, &e2)
+        );
+    }
+
+    #[test]
+    fn verbose_asks_for_more_text_not_more_credential() {
+        let a = args(&[
+            "--rpc-url",
+            "https://eth.example/v2/targetkey1234567890",
+            "--verbose",
+            TX,
+        ]);
+        let multi = "provider failed\n  at https://eth.example/v2/targetkey1234567890\n  context";
+        let msg = message(&a, &Error::Rpc(multi.into()));
+        assert!(
+            msg.contains("context"),
+            "--verbose keeps the extra text: {msg}"
+        );
+        assert!(
+            !msg.contains("targetkey1234567890"),
+            "but never the credential: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_endpoint_leaves_the_message_alone() {
+        let a = args(&[TX]);
+        assert_eq!(message(&a, &Error::NoRpcUrl), Error::NoRpcUrl.to_string());
     }
 }
