@@ -4,6 +4,7 @@
 //! parsers, ledger and analysis layer can be tested without spawning the CLI.
 
 pub mod collect;
+pub mod diff;
 pub mod error;
 pub mod exit;
 pub mod ledger;

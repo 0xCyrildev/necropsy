@@ -299,8 +299,9 @@ impl Trace {
             .unwrap_or_default()
     }
 
-    /// Root to `id`, inclusive. Used by the reentrancy detector, which needs the
-    /// open-frame set rather than any graph traversal.
+    /// Root to `id`, inclusive — the open-frame set, which is what a call *re-enters*
+    /// along. `Trace::path` walks it, so [`crate::diff`] reaches it transitively;
+    /// nothing here decides whether a repeated address on that chain is an exploit.
     pub fn ancestors(&self, id: FrameId) -> Vec<FrameId> {
         let mut chain = Vec::new();
         let mut cur = Some(id);
@@ -317,7 +318,9 @@ impl Trace {
         chain
     }
 
-    /// Position path, e.g. `root/0/2/1`, as used by the diff.
+    /// Position path, e.g. `root/0/2/1` — the coordinate [`crate::diff`] compares two
+    /// traces on. Orphans get `orphan/<arena id>`, which identifies one collection
+    /// rather than a location, and the diff says so instead of pairing them.
     pub fn path(&self, id: FrameId) -> String {
         let chain = self.ancestors(id);
         if chain
@@ -434,6 +437,14 @@ impl TraceBuilder {
     pub fn set_return_bytes(&mut self, id: FrameId, n: usize) {
         if let Some(f) = self.frames.get_mut(id as usize) {
             f.return_bytes = Some(n);
+        }
+    }
+
+    /// Attach a selector to an already-pushed frame, for a collector that learns it
+    /// after the frame line — the same shape as [`TraceBuilder::set_status`].
+    pub fn set_selector(&mut self, id: FrameId, selector: Selector) {
+        if let Some(f) = self.frames.get_mut(id as usize) {
+            f.selector = Some(selector);
         }
     }
 

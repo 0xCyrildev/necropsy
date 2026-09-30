@@ -245,6 +245,17 @@ impl Selector {
     pub fn to_hex(self) -> String {
         format!("0x{}", hex::encode(self.0))
     }
+
+    /// Exactly four bytes. [`Selector::from_calldata`] accepts longer input because
+    /// real calldata has arguments after the selector; a value being read back from
+    /// JSON has no such excuse, and a 5-byte "selector" is data corruption.
+    pub fn from_slice(b: &[u8]) -> Option<Selector> {
+        if b.len() == 4 {
+            Some(Selector(b.try_into().unwrap()))
+        } else {
+            None
+        }
+    }
 }
 
 impl fmt::Display for Selector {
@@ -262,6 +273,20 @@ impl fmt::Debug for Selector {
 impl Serialize for Selector {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for Selector {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        let digits = raw.strip_prefix("0x").unwrap_or(&raw);
+        let bytes = hex::decode(digits).map_err(serde::de::Error::custom)?;
+        Selector::from_slice(&bytes).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "expected 4-byte selector, got {} bytes",
+                bytes.len()
+            ))
+        })
     }
 }
 

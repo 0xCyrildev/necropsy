@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup and a stable toolchain are preinstalled on the runner image; no
+      # third-party action is needed to pin the version, and Cargo.toml's
+      # `rust-version = "1.85"` (edition 2024) is already satisfied by stable.
+      - name: Toolchain
+        run: rustc --version && cargo --version
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # `-D warnings` is the point: the suite is green today partly because a new
+      # lint cannot land quietly.
+      - name: Lints
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --all-targets
+
+      # All offline: the library runs against committed fixtures and a MemoryRpc, and
+      # the CLI contract tests dial port 1, which refuses instantly. Nothing here can
+      # reach a network, so CI cannot go red because a public RPC endpoint blinked.
+      - name: Test
+        run: cargo test --all-targets
