@@ -37,6 +37,26 @@ jobs:
       - name: Matrix
         run: node scripts/release-matrix.mjs >> "$GITHUB_OUTPUT"
 
+      - name: Report what the matrix expanded to
+        env:
+          MATRIX: ${{ steps.matrix.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          echo "raw output: ${MATRIX:0:200}…"
+          echo "length: ${#MATRIX}"
+          count=$(printf %s "$MATRIX" | node -e '
+            let s = "";
+            process.stdin.on("data", (d) => (s += d)).on("end", () => {
+              if (!s.trim()) { console.log(0); return; }
+              console.log(JSON.parse(s).include.length);
+            });')
+          echo "targets: $count"
+          if [ "$count" -lt 1 ]; then
+            echo "::error::the generated matrix is empty, so no build job will be queued"
+            exit 1
+          fi
+          echo "matrix-count=$count" >> "$GITHUB_OUTPUT"
+
       - name: Version
         env:
           EVENT_NAME: ${{ github.event_name }}

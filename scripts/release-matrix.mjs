@@ -20,10 +20,8 @@ const include = TARGETS.map((t) => ({
   linker: t.linker ?? "",
 }));
 
-const line = `matrix=${JSON.stringify({ include })}`;
-if (process.env.GITHUB_OUTPUT) {
-  const { appendFileSync } = await import("node:fs");
-  appendFileSync(process.env.GITHUB_OUTPUT, line + "\n");
-} else {
-  console.log(line);
-}
+// Always print, never write the file directly: the workflow redirects stdout into GITHUB_OUTPUT, so
+// there is exactly one mechanism moving this value and no chance of it landing twice — or, if the
+// env var were unset in a job, of silently producing an empty output that expands to zero build
+// jobs and fails the run with nothing in it.
+console.log(`matrix=${JSON.stringify({ include })}`);
