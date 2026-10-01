@@ -57,10 +57,27 @@ jobs:
             echo
             echo "The URL is deliberately not printed: it may carry a credential when supplied as a secret."
           } >> "$GITHUB_STEP_SUMMARY"
-          # Loud, because a green job is otherwise indistinguishable from a complete one: the
-          # collector-agreement check does not run here, so this job cannot detect two collectors
-          # disagreeing. Recorded as an annotation so the gap is on the run page, not in a log tail.
-          echo "::notice title=Invariant not enforced in CI::rpc-vs-cast ledger agreement skipped (runner has no Foundry); it is verified only by 'cargo test --test live -- --ignored' locally."
+
+      # Pinned to the same `cast` minor this parser was validated against, not "latest": a
+      # rendered-text format change in a newer release would read as a regression in necropsy.
+      # The tarball is checksum-verified against the release's own .sha256 rather than piped
+      # through an install script, so this stays a download plus a comparison.
+      - name: Install cast (pinned 1.8.1, checksum-verified)
+        run: |
+          v=1.8.1
+          f="foundry_v${v}_linux_amd64.tar.gz"
+          base="https://github.com/foundry-rs/foundry/releases/download/v${v}"
+          curl -fsSL --retry 3 -o "$f" "$base/$f"
+          expected=$(curl -fsSL "$base/foundry_v${v}_linux_amd64.sha256" | awk '{print $1}')
+          actual=$(sha256sum "$f" | awk '{print $1}')
+          if [ "$expected" != "$actual" ]; then
+            echo "checksum mismatch for $f — refusing to install" >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/.foundry-bin"
+          tar -xzf "$f" -C "$HOME/.foundry-bin"
+          echo "$HOME/.foundry-bin" >> "$GITHUB_PATH"
+          "$HOME/.foundry-bin/cast" --version | head -1
 
       - name: Live contract (one retry — endpoints flake, tools do not)
         run: |
@@ -81,4 +98,10 @@ jobs:
             echo
             grep -hoE "test result: .*" live-run2.log live-run.log 2>/dev/null | tail -1 || true
           } >> "$GITHUB_STEP_SUMMARY"
+          # Posted only if it is true this run. A standing notice that the comparison did not
+          # happen would eventually become a lie the day it does happen, and a lie in a log is
+          # worse than no note at all.
+          if grep -q "is not on PATH" live-run*.log; then
+            echo "::notice title=Invariant not enforced in CI::rpc-vs-cast ledger agreement skipped (no cast available); it is verified only by running the live tier where cast exists."
+          fi
           exit "$rc"
