@@ -280,7 +280,8 @@ trustworthy when its reader knows where the guarantee stops.
 - **205 offline tests**, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean,
   and `cargo publish --dry-run` verified to ship no file outside `src/`, `tests/`, `examples/`,
   the workflows and the docs (this repository's project memory is gitignored and stays local),
-  plus the opt-in live tier and its scheduled run.
+  plus the opt-in live tier, which CI runs on demand (its daily schedule is configured and has not
+  yet fired — see the note in Tests).
 
 What is **not** guaranteed: no release exists (no tag, no artifact — see `CHANGELOG.md`); the
 `--json` shape is versioned by `schema_version` but still 0.x, so a minor bump may rename a field;
@@ -398,12 +399,21 @@ transaction**, a self-diff declared a tautology, `--chain` refusing a wrong chai
 transaction. A red here is not automatically a defect — a public endpoint can rate-limit or drop a
 namespace between runs, so read the message before believing it.
 
-`.github/workflows/live.yml` runs those checks daily and on demand, with one retry, and it is written so
-an endpoint problem cannot masquerade as a regression: **exit 3 skips**, and only the content of a report
-that *was* read can fail the job. Each run records the node's chain id and whether it still exposes
-`debug_` before any claim is judged. The rpc-vs-cast agreement skips on the runner — it has no Foundry,
-and installing a third-party toolchain on a schedule to satisfy one check is a supply-chain decision, not
-a testing one — so that particular check runs locally.
+`.github/workflows/live.yml` runs those checks on demand, with one retry, and it is written so
+an endpoint problem cannot masquerade as a regression: **exit 3 skips**, and only the content of a
+report that *was* read can fail the job. Each run records the node's chain id and whether it still
+exposes `debug_` before any claim is judged. The rpc-vs-cast agreement runs there too: the job
+downloads one checksum-verified Foundry release tarball, pinned to 1.8.1, refuses on a hash
+mismatch and puts `cast` on `PATH` — no pipe-to-shell, and no third-party install script on a
+timer.
+
+It also declares a daily schedule (`17 6 * * *`), which is **configured and verified by dispatch,
+not yet by an actual scheduled run** — GitHub has fired it zero times as of 2026-10-01, while
+manual dispatches have run five times green. The distinction is written down because "it runs daily"
+is exactly the sort of claim that survives an unexamined config: a workflow can be active, valid and
+scheduled and still not have been triggered once. Re-check `gh api
+repos/0xCyrildev/necropsy/actions/runs?event=schedule --jq .total_count` after the next window before
+believing that half of this sentence.
 
 ## License
 
