@@ -229,12 +229,27 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
           (cd assets && sha256sum -c SHA256SUMS.txt)
-          flags=(--generate-notes)
+          # `--generate-notes` returns HTTP 422 Releases::ConfigurationError on this repository — it
+          # builds notes from merged pull requests, and every commit here was pushed directly to
+          # master, so there is nothing for it to categorise. The changelog is the better body
+          # anyway: it is written for a reader and already reviewed, and its section for this exact
+          # version is what a release page should show.
+          {
+            printf 'necropsy %s\n\n' "$VERSION"
+            awk -v v="$VERSION" '/^## /{p = ($0 ~ "^## " v)} p' CHANGELOG.md | tail -n +2
+            printf '\n## Verifying an asset\n\nsha256sum -c SHA256SUMS.txt, or run `necropsy --build-info`\nand check the version, `schema_version`, `os` and `arch` against the asset name.\n'
+          } > /tmp/notes.md
+          if [ "$(wc -c < /tmp/notes.md)" -lt 200 ]; then
+            echo "::error::the changelog section for $VERSION came out empty; refusing to publish a release with no description"
+            exit 1
+          fi
+          flags=()
           case "$TAG" in *-*) flags+=(--prerelease);; esac
-          gh release create "$TAG" --title "$TAG" "${flags[@]}" \
-            assets/*.tar.gz assets/*.tgz assets/SHA256SUMS.txt
-          gh release view "$TAG" --json tagName,prerelease,assets \
-            --jq '"released " + .tagName + " prerelease=" + (.prerelease|tostring) + " assets=" + (.assets|length|tostring)'
+          gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md \
+            "${flags[@]}" assets/*.tar.gz assets/*.tgz assets/SHA256SUMS.txt
+          gh release view "$TAG" --json tagName,isDraft,isPrerelease,assets \
+            --jq '"released " + .tagName + " draft=" + (.isDraft|tostring) + " prerelease=" + (.isPrerelease|tostring) + " assets=" + (.assets|length|tostring)'
