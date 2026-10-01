@@ -58,7 +58,7 @@ curl -sSL -O https://github.com/0xCyrildev/necropsy/releases/download/v0.2.0/nec
 sha256sum -c <(curl -sSL https://github.com/0xCyrildev/necropsy/releases/download/v0.2.0/SHA256SUMS.txt)   necropsy-0.2.0-x86_64-unknown-linux-gnu.tar.gz
 tar -xzf necropsy-0.2.0-x86_64-unknown-linux-gnu.tar.gz && ./necropsy-0.2.0-x86_64-unknown-linux-gnu/necropsy --build-info
 
-# 3. through npm, which fetches nothing at install time
+# 3. through npm — not yet on the registry; see the note below
 npm install -g @0xcyrildev/necropsy && necropsy --build-info
 ```
 
@@ -71,7 +71,14 @@ cargo build --release
 ./target/release/necropsy --rpc-url "$ETH_RPC_URL" 0x5b515946dc1177149f140777ac90879312b182117e3392e8e2703ed3cd697153
 ```
 
-The npm packages exist under the `@0xcyrildev` scope because the bare name `necropsy` on npm is
+**Option 3 does not work yet.** The six npm tarballs are published as assets of the `v0.2.0` release
+and verified by installing them from there — launcher alone fails with a message naming the platform
+and the packages that exist, launcher plus the matching platform package runs the binary and
+propagates 0/2/4 — but nothing is on the registry until the `@0xcyrildev` scope exists and
+`publish-npm.yml` is run against it. Until then, install those tarballs directly:
+`npm i ./0xcyrildev-necropsy-0.2.0.tgz ./0xcyrildev-necropsy-linux-x64-gnu-0.2.0.tgz`.
+
+The npm packages are planned under the `@0xcyrildev` scope because the bare name `necropsy` on npm is
 someone else's package — a Node core-dump debugger, unrelated and older. The distribution is the
 esbuild shape: a launcher plus one package per platform selected by npm's `os`/`cpu` fields, with
 **no `postinstall` and no download during install**. Linux x86_64 (glibc and musl), Linux arm64
@@ -311,8 +318,12 @@ trustworthy when its reader knows where the guarantee stops.
   plus the opt-in live tier, which CI runs on demand (its daily schedule is configured and has not
   yet fired — see the note in Tests).
 
-What is **not** guaranteed: no release exists (no tag, no artifact — see `CHANGELOG.md`); the
-`--json` shape is versioned by `schema_version` but still 0.x, so a minor bump may rename a field;
+What is **not** guaranteed: `v0.2.0` is the first release and its assets are new — five platform
+binaries and six npm tarballs, all checksummed, but no second pair of eyes has audited the pipeline's
+output before; the npm packages are **not on the registry yet** (they exist as release assets until
+someone owns the `@0xcyrildev` scope and runs the publish workflow, so `npm install -g` will 404
+today); and the `--json` shape is versioned by `schema_version` but still 0.x, so a minor bump may
+rename a field;
 there is no ABI decoding, no severity model and no price; `--from-json` cannot know the chain, the
 receipt or the hash of the file it reads; and a public endpoint can rate-limit, shed or drop a
 namespace between two runs, which is why the live tier distinguishes a skip from a failure.

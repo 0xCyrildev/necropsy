@@ -52,6 +52,36 @@ step: it uploads the assets to the *run*, and creates no release and no tag. Run
 because the first execution of a release workflow is not the place to discover the linker flag was
 wrong.
 
+### The release body comes from CHANGELOG.md
+
+`gh release create --generate-notes` fails here with `HTTP 422
+Releases::ConfigurationError`, and the cause is not configuration you can fix: GitHub builds those
+notes from **merged pull requests**, and this repository's history is direct pushes to `master`, so
+there is nothing to categorise and the generator reports the absence as an error. The publish step
+instead extracts the `## <version>` section of `CHANGELOG.md` — which is why step 2 (moving
+"Unreleased" under a dated heading) is part of the release, not decoration. If that extraction comes
+out under 200 bytes the job refuses to publish rather than ship a release with an empty description.
+
+Two related facts, both discovered while diagnosing that 422: release *assets* and hand-written notes
+upload fine, so the error was specifically the notes generator; and `has_downloads` on the repository
+API cannot be toggled any more (PATCHing it returns the old value) because the flag is legacy — it was
+a red herring, and the probe that showed which half of the call failed is what replaced guessing it.
+
+### If the release step fails after the tag exists
+
+Fix the workflow, commit it, then delete and re-create the tag at the fixed commit:
+
+```sh
+git tag -d v0.3.0 && git push origin :refs/tags/v0.3.0
+git tag -a v0.3.0 -m "necropsy 0.3.0" && git push origin v0.3.0
+```
+
+A rerun of the failed workflow is *not* equivalent: GitHub re-runs use the workflow file from the
+original commit, so the bug you just fixed is not in the retry. Re-pointing a tag that has no release
+attached yet is the narrow case where rewriting the ref is the right call — say so in the commit or
+the release note, because a moved tag is otherwise invisible history.
+
+
 ## Assets
 
 Per target, `necropsy-<version>-<cargo-target>.tar.gz` containing `necropsy`, `LICENSE`,
@@ -82,7 +112,9 @@ registry and nothing else. The trade is six packages to publish instead of one, 
 removal of a fetch-and-exec step from every user's machine — the same reasoning that keeps the CI
 Foundry install to a pinned, hashed tarball rather than a pipe-to-shell.
 
-Publishing is opt-in because it needs the scope first:
+Publishing is opt-in because it needs the scope first. **Status as of `v0.2.0`: the tarballs are
+attached to the release and verified by installing them from the release page, but none of them is on
+the registry yet** — the scope does not exist, so `npm install -g @0xcyrildev/necropsy` 404s.
 
 ```sh
 # one time, on npm: create the @0xcyrildev organization (or scope your user), then either add an
