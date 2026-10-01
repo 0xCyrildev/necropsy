@@ -53,11 +53,11 @@ jobs:
             echo "- \`debug_\` namespace → \`$dbg\`"
             echo
             echo "The URL is deliberately not printed: it may carry a credential when supplied as a secret."
-            echo
-            echo "The rpc-vs-cast collector agreement **skips** here by design: the runner has no Foundry, and"
-            echo "installing a third-party toolchain on a schedule to satisfy one check is a supply-chain"
-            echo "decision, not a testing one. It runs locally, where \`cast\` exists."
           } >> "$GITHUB_STEP_SUMMARY"
+          # Loud, because a green job is otherwise indistinguishable from a complete one: the
+          # collector-agreement check does not run here, so this job cannot detect two collectors
+          # disagreeing. Recorded as an annotation so the gap is on the run page, not in a log tail.
+          echo "::notice title=Invariant not enforced in CI::rpc-vs-cast ledger agreement skipped (runner has no Foundry); it is verified only by 'cargo test --test live -- --ignored' locally."
 
       - name: Live contract (one retry — endpoints flake, tools do not)
         run: |
