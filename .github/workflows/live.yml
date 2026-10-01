@@ -33,7 +33,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
+      # Pinned by commit; see ci.yml for why a moving tag is not a pin.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       # A red run is only actionable if it also records whether the node was answering at all. This
       # distinguishes "necropsy regressed" from "the endpoint moved" without anyone re-running by hand.

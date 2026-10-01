@@ -158,6 +158,8 @@ necropsy [OPTIONS] <TX>
   --tree <N>           call-tree lines to print; 0 prints every frame  [default: 200]
   --narrative          also print a flat execution narrative  [text report only]
   --no-decimals        base units only; do not ask each token for its decimals()
+  --max-response-mb <MB>     refuse an answer larger than this   [default: 32]
+  --max-trace-depth <LEVELS> refuse a trace nesting deeper than this  [default: 2048]
   --timeout <SECONDS>  per-request timeout        [default: 60]
   --verbose            full provider error text (still redacted)
 ```
@@ -196,7 +198,8 @@ nothing in the file ties it to the hash on the command line, which the notes say
 run exits **4 (degraded)**. `--chain` cannot be honoured against a file, because a trace records
 no chain id, and the run stops rather than assuming. An `ETH_RPC_URL` left in the environment is
 ignored by this path; `--rpc-url` typed beside `--from-json` is refused, because one run has one
-source.
+source. The two size guards are not network-only: a file is read up to `--max-response-mb` and
+refused past it, and its nesting is measured before it is parsed.
 
 Token decimal counts come from one `eth_call` per distinct token, at the transaction's own
 block tag — never `latest`, because metadata read from a later state describes a different
@@ -223,8 +226,17 @@ from "nothing was read".
 |---|---|
 | 0 | report produced |
 | 2 | the command was wrong (bad flags, malformed hash, no endpoint configured) |
-| 3 | nothing could be read (endpoint down, transaction absent, `cast` missing, chain mismatch) |
+| 3 | nothing could be read (endpoint down, transaction absent, `cast` missing, chain mismatch, an answer too large or too deep to read) |
 | 4 | **degraded** — a report was produced, but some input could not be accounted for |
+
+`2` is reserved for something the operator can fix by editing the command line. An HTTP status is
+not that: a gateway answering 404 for a healthy node, or 400 for a request it refused to forward,
+says something about the path between, and a caller told "your flags are wrong" will go re-read the
+manual instead of looking at the endpoint.
+
+A closed pipe — `necropsy … | head -2` — exits 0. The analysis succeeded and its bytes went as far
+as anyone wanted them; Rust ignores `SIGPIPE`, so this arrived as a write error, and reporting it
+as a crash would have produced exit 101, a code outside the contract above.
 
 A transaction that *reverted* exits 0. Analyzing a failed transaction is the point
 of the tool; its revert status is a fact in the report, not an error from necropsy.
@@ -235,6 +247,44 @@ addition overflowed. It is deliberately not set for a note like "this endpoint h
 `debug_` namespace, so `cast` rendered the tree" — that records a change of mechanism,
 not lost evidence, and a tool that cries degraded on every note trains the analyst to
 ignore the word.
+
+## Production posture
+
+What is guaranteed, and what is not. Both halves matter: a tool used during an incident is
+trustworthy when its reader knows where the guarantee stops.
+
+- **Bounded input, everywhere it arrives.** A response body, a captured file and `cast`'s stdout
+  are each read up to a ceiling (`--max-response-mb`, 32 MiB by default — about 500x the largest
+  mainnet `callTracer` answer measured here, 62 KB), and refused *rather than truncated*. Nesting
+  is measured by a linear scan before anything parses, so `--max-trace-depth` (2,048) is a
+  decision the tool states instead of a limit a parser hits on its way to a segfault. Collection
+  runs on a 256 MiB stack, including the file path.
+- **No `unsafe` in shipped code.** `#![forbid(unsafe_code)]` on both crates, scoped by `cfg` so
+  the one test that clears `PATH` can still run.
+- **A panic on untrusted bytes is a bug.** `tests/hostile_input.rs` runs a deterministic corpus of
+  degenerate documents through truncation, single-byte flips and inserted control characters,
+  across the scanner, the parser, the trace builder and the log classifier. No RNG, so a failure
+  reproduces with the same line number.
+- **The transport is tested, not assumed.** `tests/http_boundary.rs` drives the real client against
+  a loopback server: which statuses retry (429/502 do, 400/404 do not), that a `Retry-After` is
+  waited out, that an oversized answer is refused after one request, and that a `-32601` still
+  arrives as an answer the collector switch can act on. None of it reaches the internet.
+- **Reproducible build.** `Cargo.lock` is committed, CI builds `--locked`, CI actions are pinned by
+  commit rather than by a moving tag, the runner image is pinned, and the declared MSRV (1.85) is
+  compiled against in CI instead of asserted in a file.
+- **A credential cannot leave the process.** See above — error text, `--help`, `cast`'s argv and the
+  notes all redact, and a remote plain-HTTP endpoint says so in the report.
+- **205 offline tests**, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean,
+  plus the opt-in live tier and its scheduled run.
+
+What is **not** guaranteed: no release exists (no tag, no artifact — see `CHANGELOG.md`); the
+`--json` shape is versioned by `schema_version` but still 0.x, so a minor bump may rename a field;
+there is no ABI decoding, no severity model and no price; `--from-json` cannot know the chain, the
+receipt or the hash of the file it reads; and a public endpoint can rate-limit, shed or drop a
+namespace between two runs, which is why the live tier distinguishes a skip from a failure.
+
+Report a security problem through **SECURITY.md**, which also says what this tool's threat model
+does and does not cover.
 
 ## Library
 
@@ -309,7 +359,8 @@ Ordered by what each one unblocks, not by ease. None of these is a promise about
 ## Tests
 
 ```sh
-cargo test --all-targets   # 152 library + 3 argument-handling + 20 CLI-contract + 2 fixture tests, all offline
+cargo test --all-targets   # 162 library + 4 argument-handling + 23 CLI-contract + 2 fixture
+                         # + 8 loopback-HTTP + 6 hostile-input tests — all offline
 cargo clippy --all-targets
 ```
 

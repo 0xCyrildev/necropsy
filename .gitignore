@@ -1,6 +1,9 @@
 /target
-Cargo.lock
 .env
+# Cargo.lock is committed. This crate ships a binary, and `cargo build` without a lockfile
+# resolves against whatever the registry index says today -- so "the same commit" is not the
+# same program, and a CI green light can arrive from a dependency nobody reviewed. Library
+# consumers ignore this file; only the binary's reproducibility depends on it.
 # Project memory: this repo is public, and AGENTS.md records local environment
 # facts and open threads. Loaded from disk by the agent either way.
 AGENTS.md

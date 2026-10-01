@@ -48,12 +48,22 @@ pub fn degraded(c: &Collection, l: &Ledger) -> bool {
         || !l.overflow.is_empty()
 }
 
+/// The shape of the `--json` document. Distinct from the crate version on purpose: a `0.2.1`
+/// that changes nothing here must not look like a breaking change to a consumer, and a
+/// release that renames a field has to say so in the artifact itself, not only in a
+/// changelog a machine never reads.
+///
+/// Bump on any field removed, renamed, or made to mean something else. Additive fields do
+/// not bump it, and a consumer should ignore keys it does not know.
+pub const SCHEMA_VERSION: u32 = 1;
+
 /// The machine-readable report. A versioned document, not a dump of internal
 /// types, so a consumer can depend on the shape.
 #[derive(Debug, Serialize)]
 pub struct Report<'a> {
     pub tool: &'a str,
     pub version: &'a str,
+    pub schema_version: u32,
     pub degraded: bool,
     /// The hash that was asked for. Always present, because it is the argument,
     /// even when the endpoint said nothing about it.
@@ -96,6 +106,7 @@ impl<'a> Report<'a> {
     pub fn build(c: &'a Collection, l: &'a Ledger, hash: TxHash) -> Report<'a> {
         Report {
             tool: "necropsy",
+            schema_version: SCHEMA_VERSION,
             version: env!("CARGO_PKG_VERSION"),
             degraded: degraded(c, l),
             hash: hash.to_hex(),
@@ -1033,6 +1044,9 @@ mod tests {
         assert_eq!(r.version, env!("CARGO_PKG_VERSION"));
         let json = r.to_json().unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // The document says which shape it is, in the artifact, because a consumer cannot
+        // read a changelog. `version` is the crate; this is the schema.
+        assert_eq!(v["schema_version"], SCHEMA_VERSION);
         assert_eq!(v["degraded"], serde_json::Value::Bool(false));
         assert_eq!(v["accounting"]["frames_total"], 2);
         assert_eq!(v["accounting"]["events_fungible"], 1);

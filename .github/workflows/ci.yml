@@ -15,7 +15,10 @@ jobs:
     # reason a contract check goes red -- or, worse, silently changes what it sees.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      # Pinned by commit, not by tag: `v5` is a moving ref, and an action's tag can be
+      # repointed at a different commit without a diff anyone reads.
+      # v5, verified with `gh api repos/actions/checkout/commits/v5 --jq .sha`.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       # rustup and a stable toolchain are preinstalled on the runner image; no
       # third-party action is needed to pin the version, and Cargo.toml's
@@ -31,11 +34,21 @@ jobs:
       - name: Lints
         run: cargo clippy --all-targets -- -D warnings
 
+      # `--locked` is the reason Cargo.lock is committed: the build refuses if the resolved
+      # set drifts from the file in the tree, so a dependency change has to be a commit.
       - name: Build
-        run: cargo build --all-targets
+        run: cargo build --all-targets --locked
 
       # All offline: the library runs against committed fixtures and a MemoryRpc, and
       # the CLI contract tests dial port 1, which refuses instantly. Nothing here can
       # reach a network, so CI cannot go red because a public RPC endpoint blinked.
       - name: Test
-        run: cargo test --all-targets
+        run: cargo test --all-targets --locked
+
+      # The declared MSRV is a promise, and an untested promise is a lie waiting for a user.
+      # `rust-version = "1.85"` in Cargo.toml: edition 2024 plus `let ... else`, and nothing
+      # newer than that is allowed to reach `src/`.
+      - name: MSRV
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal
+          cargo +1.85.0 check --all-targets --locked

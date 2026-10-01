@@ -121,6 +121,7 @@ fn live_json_is_a_consumable_document_with_string_amounts() {
     for key in [
         "tool",
         "version",
+        "schema_version",
         "degraded",
         "hash",
         "tx",
