@@ -270,11 +270,16 @@ trustworthy when its reader knows where the guarantee stops.
   waited out, that an oversized answer is refused after one request, and that a `-32601` still
   arrives as an answer the collector switch can act on. None of it reaches the internet.
 - **Reproducible build.** `Cargo.lock` is committed, CI builds `--locked`, CI actions are pinned by
-  commit rather than by a moving tag, the runner image is pinned, and the declared MSRV (1.85) is
-  compiled against in CI instead of asserted in a file.
+  commit rather than by a moving tag, the runner image *and* the toolchain are pinned (a newer
+  clippy turns `-D warnings` red on a commit that changed nothing), and the declared MSRV is
+  compiled against in CI instead of asserted in a file. The floor is 1.90 and it is not ours:
+  `ruint` — the `U256` every amount in the ledger is stored in — declares `rust-version =
+  "1.90"`, and a dependency's floor is the build's floor.
 - **A credential cannot leave the process.** See above — error text, `--help`, `cast`'s argv and the
   notes all redact, and a remote plain-HTTP endpoint says so in the report.
 - **205 offline tests**, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean,
+  and `cargo publish --dry-run` verified to ship no file outside `src/`, `tests/`, `examples/`,
+  the workflows and the docs (this repository's project memory is gitignored and stays local),
   plus the opt-in live tier and its scheduled run.
 
 What is **not** guaranteed: no release exists (no tag, no artifact — see `CHANGELOG.md`); the

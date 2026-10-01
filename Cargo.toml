@@ -2,7 +2,7 @@
 name = "necropsy"
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.90"
 description = "Post-transaction forensics for EVM: reconstruct the call tree and rank where value ended up"
 license = "MIT"
 repository = "https://github.com/0xCyrildev/necropsy"

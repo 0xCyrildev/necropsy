@@ -245,16 +245,16 @@ impl HttpRpc {
 }
 
 fn parse_envelope(mut value: Value, method: &str, redactor: &Redactor) -> Result<Value> {
-    if let Some(err) = value.get("error") {
-        if !err.is_null() {
-            let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
-            let message = err
-                .get("message")
-                .and_then(|m| m.as_str())
-                .map(|s| redactor.redact(s))
-                .unwrap_else_placeholder();
-            return Err(Error::RpcError { code, message });
-        }
+    if let Some(err) = value.get("error")
+        && !err.is_null()
+    {
+        let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+        let message = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(|s| redactor.redact(s))
+            .unwrap_else_placeholder();
+        return Err(Error::RpcError { code, message });
     }
     value.get_mut("result").map(std::mem::take).ok_or_else(|| {
         Error::Rpc(format!(

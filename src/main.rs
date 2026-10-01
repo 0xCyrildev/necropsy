@@ -237,12 +237,10 @@ fn run(args: &Args, endpoint_named: bool) -> Result<(String, Exit)> {
     // alongside --from-json; an endpoint named on the command line is refused here, because
     // it says "dial" in the same breath as "read this file". `ETH_RPC_URL` does not: that is
     // configuration left in the environment, not an instruction about this transaction.
-    if endpoint_named {
-        if let Some(path) = args.from_json.as_deref() {
-            return Err(Error::MixedSource {
-                path: path.to_string(),
-            });
-        }
+    if endpoint_named && let Some(path) = args.from_json.as_deref() {
+        return Err(Error::MixedSource {
+            path: path.to_string(),
+        });
     }
     let node = if args.from_json.is_some() {
         None
@@ -297,10 +295,10 @@ fn run(args: &Args, endpoint_named: bool) -> Result<(String, Exit)> {
     };
 
     // A `--from-json` run has no endpoint to warn about, so this rides on the node path only.
-    if let Some(n) = &node {
-        if let Some(note) = cleartext_note(&n.url) {
-            c.notes.push(note);
-        }
+    if let Some(n) = &node
+        && let Some(note) = cleartext_note(&n.url)
+    {
+        c.notes.push(note);
     }
     let l = ledger::build(&c.events, &c.trace, c.tx.as_ref().and_then(|m| m.status));
 

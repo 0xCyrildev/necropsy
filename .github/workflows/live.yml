@@ -36,6 +36,14 @@ jobs:
       # Pinned by commit; see ci.yml for why a moving tag is not a pin.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
+      # Same pinned toolchain as the hermetic job, so a runner image update cannot be the reason a
+      # live contract check changes behaviour -- and so both jobs compile the same source.
+      - name: Toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+          rustc --version
+
       # A red run is only actionable if it also records whether the node was answering at all. This
       # distinguishes "necropsy regressed" from "the endpoint moved" without anyone re-running by hand.
       - name: Endpoint pre-flight
@@ -83,11 +91,11 @@ jobs:
       - name: Live contract (one retry — endpoints flake, tools do not)
         run: |
           rc=0
-          cargo test --test live -- --ignored --nocapture > live-run.log 2>&1 || rc=$?
+          cargo test --test live --locked -- --ignored --nocapture > live-run.log 2>&1 || rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "::notice::first attempt failed (rc=$rc); retrying in 60s — one failure against a public endpoint is weak evidence"
             sleep 60
-            cargo test --test live -- --ignored --nocapture > live-run2.log 2>&1 || rc=$?
+            cargo test --test live --locked -- --ignored --nocapture > live-run2.log 2>&1 || rc=$?
           fi
           cat live-run*.log
           {

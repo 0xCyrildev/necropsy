@@ -228,20 +228,20 @@ pub fn classify(log: &RawLog) -> TokenEvent {
         };
     }
 
-    if t0 == *sig::TRANSFER_SINGLE && n == 4 {
-        if let (Some(id), Some(value)) = (word(&log.data, 0), word(&log.data, 1)) {
-            if log.data.len() == 64 {
-                return TokenEvent::Erc1155Single {
-                    token: log.address,
-                    operator: Address::from_topic(&log.topics[0]),
-                    from: Address::from_topic(&log.topics[1]),
-                    to: Address::from_topic(&log.topics[2]),
-                    id,
-                    value,
-                    log_index: log.log_index,
-                };
-            }
-        }
+    if t0 == *sig::TRANSFER_SINGLE
+        && n == 4
+        && let (Some(id), Some(value)) = (word(&log.data, 0), word(&log.data, 1))
+        && log.data.len() == 64
+    {
+        return TokenEvent::Erc1155Single {
+            token: log.address,
+            operator: Address::from_topic(&log.topics[0]),
+            from: Address::from_topic(&log.topics[1]),
+            to: Address::from_topic(&log.topics[2]),
+            id,
+            value,
+            log_index: log.log_index,
+        };
     }
 
     if t0 == *sig::TRANSFER_BATCH && n == 4 {
@@ -250,21 +250,21 @@ pub fn classify(log: &RawLog) -> TokenEvent {
         let to = Address::from_topic(&log.topics[2]);
         let off_ids = word(&log.data, 0).and_then(|a| usize::try_from(a.0).ok());
         let off_vals = word(&log.data, 1).and_then(|a| usize::try_from(a.0).ok());
-        if let (Some(oi), Some(ov)) = (off_ids, off_vals) {
-            if let (Some(ids), Some(values)) = (
+        if let (Some(oi), Some(ov)) = (off_ids, off_vals)
+            && let (Some(ids), Some(values)) = (
                 decode_u256_array(&log.data, oi),
                 decode_u256_array(&log.data, ov),
-            ) {
-                return TokenEvent::Erc1155Batch {
-                    token: log.address,
-                    operator,
-                    from,
-                    to,
-                    ids,
-                    values,
-                    log_index: log.log_index,
-                };
-            }
+            )
+        {
+            return TokenEvent::Erc1155Batch {
+                token: log.address,
+                operator,
+                from,
+                to,
+                ids,
+                values,
+                log_index: log.log_index,
+            };
         }
         return TokenEvent::Unclassified {
             address: log.address,
@@ -276,32 +276,36 @@ pub fn classify(log: &RawLog) -> TokenEvent {
         };
     }
 
-    if t0 == *sig::WETH_DEPOSIT && n == 2 && log.data.len() == 32 {
-        if let (Some(owner), Some(amount)) = (
+    if t0 == *sig::WETH_DEPOSIT
+        && n == 2
+        && log.data.len() == 32
+        && let (Some(owner), Some(amount)) = (
             log.topics.get(1).copied().map(|t| Address::from_topic(&t)),
             word(&log.data, 0),
-        ) {
-            return TokenEvent::WethDeposit {
-                weth: log.address,
-                owner,
-                amount,
-                log_index: log.log_index,
-            };
-        }
+        )
+    {
+        return TokenEvent::WethDeposit {
+            weth: log.address,
+            owner,
+            amount,
+            log_index: log.log_index,
+        };
     }
 
-    if t0 == *sig::WETH_WITHDRAWAL && n == 2 && log.data.len() == 32 {
-        if let (Some(owner), Some(amount)) = (
+    if t0 == *sig::WETH_WITHDRAWAL
+        && n == 2
+        && log.data.len() == 32
+        && let (Some(owner), Some(amount)) = (
             log.topics.get(1).copied().map(|t| Address::from_topic(&t)),
             word(&log.data, 0),
-        ) {
-            return TokenEvent::WethWithdrawal {
-                weth: log.address,
-                owner,
-                amount,
-                log_index: log.log_index,
-            };
-        }
+        )
+    {
+        return TokenEvent::WethWithdrawal {
+            weth: log.address,
+            owner,
+            amount,
+            log_index: log.log_index,
+        };
     }
 
     if t0 == *sig::APPROVAL {

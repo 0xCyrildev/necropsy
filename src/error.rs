@@ -121,14 +121,14 @@ impl Redactor {
             }
             if let Some((_, query)) = rest.split_once('?') {
                 for kv in query.split('&') {
-                    if let Some((k, v)) = kv.split_once('=') {
-                        if matches!(
+                    if let Some((k, v)) = kv.split_once('=')
+                        && matches!(
                             k.to_ascii_lowercase().as_str(),
                             "key" | "api_key" | "apikey" | "token"
-                        ) {
-                            parts.push(v.to_string());
-                            parts.push(format!("{k}={v}"));
-                        }
+                        )
+                    {
+                        parts.push(v.to_string());
+                        parts.push(format!("{k}={v}"));
                     }
                 }
             }

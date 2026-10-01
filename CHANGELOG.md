@@ -22,6 +22,10 @@ honest heading for all of it until a tag exists.
   `--from-json` alike, and a refusal says which number was crossed rather than reading as a
   parse failure.
 - `schema_version` in the `--json` document: the shape's version, distinct from the crate's.
+- CI compiles the declared MSRV instead of asserting it. `rust-version` was **1.85 and is now
+  1.90**, because `ruint` — the `U256` the ledger's amounts are — declares 1.90 in its own manifest;
+  the older number had never been built. Also verified: `cargo publish --dry-run` packages nothing
+  outside `src/`, `tests/`, `examples/`, the workflows and the docs.
 - `--baseline-tx-hash` / `--baseline-rpc-url` — structural comparison against a second
   transaction, from the same endpoint or a different one, with `--chain` guarding both sides.
 - Per-token `decimals()` read at the transaction's own block tag; amounts scale beside base

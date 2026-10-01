@@ -20,11 +20,16 @@ jobs:
       # v5, verified with `gh api repos/actions/checkout/commits/v5 --jq .sha`.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
-      # rustup and a stable toolchain are preinstalled on the runner image; no
-      # third-party action is needed to pin the version, and Cargo.toml's
-      # `rust-version = "1.85"` (edition 2024) is already satisfied by stable.
+      # The toolchain is pinned, not "whatever the runner image happens to ship". Two reasons.
+      # `-D warnings` means a lint added in a newer clippy turns CI red on a commit that did not
+      # change, so the version doing the linting has to be part of the configuration. And `src/`
+      # uses let-chains, which need 1.88+ while the crate's own floor is 1.90.
+      # This is the exact version the tree was formatted, linted and tested with locally.
       - name: Toolchain
-        run: rustc --version && cargo --version
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal -c clippy -c rustfmt
+          rustup default 1.97.1
+          rustc --version && cargo --version && cargo clippy --version
 
       - name: Format
         run: cargo fmt --all --check
@@ -45,10 +50,13 @@ jobs:
       - name: Test
         run: cargo test --all-targets --locked
 
-      # The declared MSRV is a promise, and an untested promise is a lie waiting for a user.
-      # `rust-version = "1.85"` in Cargo.toml: edition 2024 plus `let ... else`, and nothing
-      # newer than that is allowed to reach `src/`.
+      # The declared MSRV is a promise, and a promise CI does not exercise is a lie waiting for a
+      # user. 1.90 is not this crate's own floor -- edition 2024 needs only 1.85 -- it is `ruint`'s,
+      # read from the vendored manifest (registry `ruint-1.20.1/Cargo.toml`:
+      # `rust-version = "1.90"`), and `ruint` is the `U256` every amount in the ledger is stored
+      # in. A dependency's floor is the build's floor, so the honest move is to declare it, not to
+      # pin an older ruint to keep a nicer number.
       - name: MSRV
         run: |
-          rustup toolchain install 1.85.0 --profile minimal
-          cargo +1.85.0 check --all-targets --locked
+          rustup toolchain install 1.90.0 --profile minimal
+          cargo +1.90.0 check --all-targets --locked
