@@ -28,13 +28,14 @@ concurrency:
   group: publish-npm
   cancel-in-progress: false
 
-# Requires an `npm` environment to exist on the repository. Without it the workflow fails here
-# rather than half-publishing.
-environment: npm
-
 jobs:
   publish:
     runs-on: ubuntu-24.04
+    # `environment` is a JOB key, not a workflow key. It sat at column zero for three pushes, and
+    # GitHub's response was not a validation message you can read: every push created a run of this
+    # workflow with no jobs and conclusion "failure". Requires an `npm` environment to exist on the
+    # repository; without it the workflow waits here rather than half-publishing.
+    environment: npm
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
