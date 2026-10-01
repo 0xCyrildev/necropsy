@@ -55,7 +55,10 @@ export const TARGETS = [
     linker: "aarch64-linux-gnu-gcc",
     cc: "aarch64-linux-gnu-gcc",
     ar: "aarch64-linux-gnu-ar",
-    qemu: "qemu-aarch64 -L /usr/aarch64-linux-gnu",
+    // `-static` is the name Ubuntu's qemu-user-static installs: /usr/bin/qemu-aarch64-static.
+    // The unsuffixed binary belongs to qemu-user and is not what a static runner image provides --
+    // asking for it produced `spawnSync qemu-aarch64 ENOENT` in the second rehearsal.
+    qemu: "qemu-aarch64-static -L /usr/aarch64-linux-gnu",
   },
   {
     npmName: "@0xcyrildev/necropsy-darwin-arm64",

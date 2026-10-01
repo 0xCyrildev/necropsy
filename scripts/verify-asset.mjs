@@ -53,7 +53,20 @@ let ran = false;
 const emulation = (process.env.NECROPSY_QEMU || "").split(/\s+/).filter(Boolean);
 if (executableHere(target) || emulation.length) {
   const argv = [...emulation, bin, "--build-info"];
-  const info = JSON.parse(execFileSync(argv[0], argv.slice(1), { encoding: "utf8" }));
+  let stdout;
+  try {
+    stdout = execFileSync(argv[0], argv.slice(1), { encoding: "utf8" });
+  } catch (e) {
+    // A missing emulator or a faulting binary is a verification failure, not a skip: the asset
+    // would otherwise ship with the exec check silently un-performed.
+    console.error(
+      `COULD NOT EXECUTE ${argv.join(" ")}: ${e.message}\n` +
+        `  the header matched, but the binary could not be asked what it is. Fix the emulator or ` +
+        `drop the target; do not ship the unverified case as a verified one.`,
+    );
+    process.exit(1);
+  }
+  const info = JSON.parse(stdout);
   if (info.os !== target.rustOs || info.arch !== target.rustArch) {
     console.error(
       `MISMATCH: ${bin} runs and reports os=${info.os} arch=${info.arch}, expected ${target.rustOs}/${target.rustArch}`,

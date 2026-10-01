@@ -124,24 +124,28 @@ jobs:
           cargo build --release --locked --target ${{ matrix.cargoTarget }}
           ls -l "target/${{ matrix.cargoTarget }}/release/necropsy"
 
+      # The `qemu` prefix comes from the matrix rather than a conditional here, so the arm64 case is
+      # declared once (in scripts/targets.mjs) instead of being re-derived from runner facts.
       - name: Verify this asset is the target it claims
         env:
-          NECROPSY_QEMU: ${{ matrix.cpu == 'arm64' && matrix.os == 'linux' && runner.os == 'Linux' && 'qemu-aarch64 -L /usr/aarch64-linux-gnu' || '' }}
-        run: node scripts/verify-asset.mjs "${{ matrix.cargoTarget }}" "target/${{ matrix.cargoTarget }}/release/necropsy" "${{ needs.plan.outputs.version }}"
+          NECROPSY_QEMU: ${{ matrix.qemu }}
+          CARGO_TARGET: ${{ matrix.cargoTarget }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: node scripts/verify-asset.mjs "$CARGO_TARGET" "target/$CARGO_TARGET/release/necropsy" "$VERSION"
 
+      # Written by scripts/stage-asset.mjs, not `tar`. The GNU reproducibility flags
+      # (`--sort --mtime --owner --group`) are what made the archive byte-stable on Linux, and macOS
+      # bsdtar rejects `--sort=name` outright -- which cost both Darwin jobs on the first two
+      # rehearsals. A Node writer produces the same bytes on every runner instead of the same
+      # intention on some of them, and it is testable here rather than only in CI.
       - name: Stage
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          CARGO_TARGET: ${{ matrix.cargoTarget }}
         run: |
           set -euo pipefail
-          v="${{ needs.plan.outputs.version }}"
-          t="${{ matrix.cargoTarget }}"
-          dir="necropsy-$v-$t"
-          mkdir -p stage/"$dir"
-          cp "target/$t/release/necropsy" LICENSE README.md stage/"$dir"/
-          # Deterministic archive: fixed mtime, fixed order, sorted entries, so two runs of one
-          # commit produce the same bytes and a checksum change means a content change.
-          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-              -C stage -czf "stage/$dir.tar.gz" "$dir"
-          (cd stage && sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256" && sha256sum -c "$dir.tar.gz.sha256")
+          node scripts/stage-asset.mjs "target/$CARGO_TARGET/release/necropsy" stage "$VERSION" "$CARGO_TARGET"
+          (cd stage && sha256sum -c "necropsy-$VERSION-$CARGO_TARGET.tar.gz.sha256")
           cp LICENSE README.md stage/
           ls -l stage
 
