@@ -309,13 +309,10 @@ fn a_missing_trace_file_is_a_usage_error_that_names_the_path() {
 fn a_captured_error_response_is_not_read_as_an_empty_trace() {
     // The dangerous input: a saved "-32603 internal error" parsed as a frame tree would
     // report a transaction that did nothing.
-    let mut path = std::env::temp_dir();
-    path.push(format!("necropsy-cli-err-{}.json", std::process::id()));
-    std::fs::write(
-        &path,
+    let path = temp_file(
+        "err",
         r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}"#,
-    )
-    .expect("temp written");
+    );
     necropsy()
         .arg("--from-json")
         .arg(&path)
@@ -324,4 +321,90 @@ fn a_captured_error_response_is_not_read_as_an_empty_trace() {
         .code(2)
         .stderr(predicate::str::contains("JSON-RPC error"));
     let _ = std::fs::remove_file(&path);
+}
+
+/// A file in the temp dir, named for the process so parallel tests cannot collide.
+fn temp_file(name: &str, body: &str) -> String {
+    let mut path = std::env::temp_dir();
+    path.push(format!("necropsy-cli-{name}-{}.json", std::process::id()));
+    std::fs::write(&path, body).expect("temp written");
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn a_trace_nesting_past_the_bound_is_refused_with_the_number() {
+    // 300 levels. `serde_json` would call this a parse error; the point of the guard is that
+    // it is a *policy* answer the operator can move with a flag, naming both numbers.
+    let nested = format!("{}1{}", "[".repeat(300), "]".repeat(300));
+    let path = temp_file("deep", &nested);
+    necropsy()
+        .args(["--from-json", &path, "--max-trace-depth", "128"])
+        .arg(HASH)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--max-trace-depth"))
+        .stderr(predicate::str::contains("300"));
+    // The same file, bound raised: the depth guard lets it through, and the next one — is it
+    // a frame at all — is what rejects it. Two different rules, two different sentences.
+    necropsy()
+        .args(["--from-json", &path, "--max-trace-depth", "512"])
+        .arg(HASH)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "does not look like a callTracer frame",
+        ));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_file_larger_than_the_read_limit_is_refused_before_it_is_parsed() {
+    // 2 MiB of JSON against a 1 MB ceiling. Refusing after reading would have allocated it
+    // anyway, but the point of the message is that the *file* is what was rejected.
+    let big = format!(
+        "{{\"type\":\"call\",\"from\":\"0x{}\",\"to\":\"0x{}\",\"input\":\"0x{}\",\"gas\":1,\"calls\":[]}}",
+        "a".repeat(40),
+        "b".repeat(40),
+        "f".repeat(2 * 1024 * 1024)
+    );
+    let path = temp_file("big", &big);
+    necropsy()
+        .args(["--from-json", &path, "--max-response-mb", "1"])
+        .arg(HASH)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "larger than the 1048576 byte read limit",
+        ));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_reader_that_went_away_is_not_a_failed_run() {
+    // `necropsy … | head -2` closes the pipe while the report is still being written. Rust
+    // ignores SIGPIPE, so that arrives as an EPIPE *write error*, and `println!` panics:
+    // exit 101, outside the documented 0/2/3/4, for a pipeline the operator chose.
+    use std::process::{Command, Stdio};
+    let bin = env!("CARGO_BIN_EXE_necropsy");
+    let mut child = Command::new(bin)
+        .args(["--from-json", &fixture_path(), "--tree", "0"])
+        .arg(HASH)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawned");
+    // Closing the read end is the hang-up. The wide fixture is ~3,000 frames, so the report
+    // is far larger than a pipe buffer and the write cannot complete quietly.
+    drop(child.stdout.take());
+    let out = child.wait_with_output().expect("waited");
+    assert!(
+        out.status.code() == Some(0),
+        "a broken pipe must not be a crash: got {:?}",
+        out.status
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !err.contains("panicked"),
+        "the printing layer panicked at the operator: {err}"
+    );
 }

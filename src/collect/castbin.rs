@@ -30,6 +30,11 @@ pub enum CastMode {
 pub struct CastConfig {
     pub rpc_url: String,
     pub timeout: Duration,
+    /// Ceiling on what `cast` may print. Its own bound, because this mechanism reads a
+    /// **pipe** rather than an HTTP response and needs the same rule: an unbounded
+    /// `read_to_end` lets the child process decide this one's memory, and `timeout` bounds
+    /// how long it runs, not how much it emits.
+    pub max_bytes: u64,
     pub mode: CastMode,
     /// Set to keep `cast`'s label and signature lookups on. Off by default,
     /// because a resolved name replaces the address in the line we parse — which
@@ -44,6 +49,7 @@ impl CastConfig {
                 rpc_url: url,
                 timeout,
                 mode,
+                max_bytes: crate::collect::rpc::DEFAULT_MAX_RESPONSE_BYTES,
                 external_identification: false,
             })
         })
@@ -110,14 +116,19 @@ pub fn run_cast_with(cfg: &CastConfig, hash: TxHash) -> Result<String> {
         .take()
         .ok_or_else(|| Error::Collect("no stderr pipe".into()))?;
 
+    // `+ 1` so "exactly at the ceiling" and "past it" are distinguishable after the join,
+    // the same trick the HTTP reader uses.
+    let limit = cfg.max_bytes.saturating_add(1);
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
+        let _ = stdout.by_ref().take(limit).read_to_end(&mut buf);
         buf
     });
     let err_reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf);
+        // Diagnostic text is not evidence; one megabyte of it is already more than a human
+        // can read, and this is the side that provider errors (and their URLs) arrive on.
+        let _ = stderr.by_ref().take(1024 * 1024).read_to_end(&mut buf);
         buf
     });
 
@@ -145,6 +156,16 @@ pub fn run_cast_with(cfg: &CastConfig, hash: TxHash) -> Result<String> {
         .map_err(|_| Error::Collect("cast stderr reader panicked".into()))?;
 
     let stdout_text = String::from_utf8_lossy(&out_bytes).to_string();
+
+    // Checked here, *before* the decode, for the same reason the HTTP path checks: past the
+    // ceiling there is no trace to parse, and reporting a truncated one as a smaller tree is
+    // the failure this tool exists to avoid. `cast` has already exited by now, so nothing is
+    // left to kill.
+    if out_bytes.len() as u64 > cfg.max_bytes {
+        return Err(Error::ResponseTooLarge {
+            limit: cfg.max_bytes,
+        });
+    }
 
     if !status.success() {
         // A non-zero `cast` is a real failure of the *command*, never a statement
@@ -207,6 +228,7 @@ mod tests {
     fn missing_cast_is_reported_as_such() {
         // A PATH with nothing on it stands in for "Foundry not installed".
         let cfg = CastConfig {
+            max_bytes: crate::collect::rpc::DEFAULT_MAX_RESPONSE_BYTES,
             rpc_url: "https://x.invalid/v2/SECRETVALUE123456".into(),
             timeout: Duration::from_millis(50),
             mode: CastMode::Rendered,

@@ -20,6 +20,18 @@ pub enum Error {
     #[error("rpc endpoint answered HTTP {status}")]
     Http { status: u16 },
 
+    /// The response was bounded on purpose. Silence here would be the worst outcome a
+    /// forensics tool can have: a truncated trace parses into a smaller tree, and a
+    /// smaller tree is a confident wrong answer about who received what. Phrased without a
+    /// mechanism, because the same rule now covers the HTTP body and `cast`'s stdout.
+    #[error(
+        "the answer was larger than {limit} bytes and was refused, not truncated; raise --max-response-mb"
+    )]
+    ResponseTooLarge { limit: u64 },
+
+    #[error("trace nests {depth} levels deep, past the {limit} allowed; raise --max-trace-depth")]
+    TraceTooDeep { depth: usize, limit: usize },
+
     #[error("rpc endpoint answered JSON-RPC error {code}: {message}")]
     RpcError { code: i64, message: String },
 

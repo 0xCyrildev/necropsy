@@ -17,21 +17,49 @@ use crate::collect::calltracer::build_trace;
 use crate::error::{Error, Result};
 use crate::model::{Collector, Provenance};
 use serde_json::Value;
+use std::io::Read;
 
 /// Load a callTracer tree from a file: the bare frame object, or a JSON-RPC envelope
 /// carrying it under `result`.
-pub fn collection_from_json(path: &str) -> Result<Collection> {
+///
+/// Both bounds apply to the file path as well as the network path. A captured trace is
+/// somebody else's artifact — exported, pasted, produced by a tool nobody audited — and
+/// reading it without a cap means that file decides this process's memory. `max_bytes` is
+/// enforced *while reading*, not from a `metadata()` call that a swap could invalidate.
+pub fn collection_from_json(path: &str, max_bytes: u64, max_depth: usize) -> Result<Collection> {
     let bad = |message: String| Error::Input {
         path: path.to_string(),
         message,
     };
 
-    let raw = std::fs::read_to_string(path).map_err(|e| bad(format!("could not be read: {e}")))?;
-    let doc: Value =
-        serde_json::from_str(&raw).map_err(|e| bad(format!("is not valid JSON: {e}")))?;
+    let mut raw = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|mut f| {
+            f.by_ref()
+                .take(max_bytes.saturating_add(1))
+                .read_to_end(&mut raw)
+        })
+        .map_err(|e| bad(format!("could not be read: {e}")))?;
+    if raw.len() as u64 > max_bytes {
+        return Err(bad(format!(
+            "is larger than the {max_bytes} byte read limit, so it is not a trace anyone \
+             vouched for; --max-response-mb moves the limit"
+        )));
+    }
 
     // A captured *error* response is not an empty trace. Reading it as one would turn
     // someone else's failed request into "this transaction did nothing".
+    let doc = match crate::collect::depth::bounded_value(&raw, max_depth) {
+        Ok(doc) => doc,
+        // The depth limit is a property of the file, not of the flag that carried it in, so
+        // it is reported as an input problem naming the file — with the flag to move.
+        Err(Error::TraceTooDeep { depth, limit }) => {
+            return Err(bad(format!(
+                "nests {depth} levels deep, past the {limit} allowed by --max-trace-depth"
+            )));
+        }
+        Err(e) => return Err(bad(format!("is not valid JSON: {e}"))),
+    };
     if let Some(err) = doc.get("error").filter(|e| !e.is_null()) {
         return Err(bad(format!(
             "holds a JSON-RPC error, not a trace: {}",
@@ -108,6 +136,13 @@ mod tests {
         p.to_string_lossy().into_owned()
     }
 
+    use crate::collect::rpc::{DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_TRACE_DEPTH};
+
+    /// Same bounds the CLI uses by default, so the tests exercise the shipped policy.
+    fn read(path: &str) -> Result<Collection> {
+        collection_from_json(path, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_TRACE_DEPTH)
+    }
+
     /// The real captured response, committed as a fixture — not a hand-written imitation.
     fn captured() -> String {
         format!(
@@ -118,7 +153,7 @@ mod tests {
 
     #[test]
     fn a_captured_calltracer_file_builds_the_same_two_frame_tree() {
-        let c = collection_from_json(&captured()).expect("the fixture parses");
+        let c = read(&captured()).expect("the fixture parses");
         assert_eq!(c.trace.len(), 2);
         assert_eq!(c.logs.len(), 0, "a trace alone carries no logs");
         assert!(c.tx.is_none(), "and no transaction metadata either");
@@ -139,7 +174,7 @@ mod tests {
                 inner = inner
             ),
         );
-        let c = collection_from_json(&path).expect("envelope parses");
+        let c = read(&path).expect("envelope parses");
         assert_eq!(c.trace.len(), 2);
         let _ = std::fs::remove_file(&path);
     }
@@ -152,7 +187,7 @@ mod tests {
             "err",
             r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}"#,
         );
-        let e = collection_from_json(&path).unwrap_err();
+        let e = read(&path).unwrap_err();
         assert!(e.to_string().contains("JSON-RPC error"), "{e}");
         let _ = std::fs::remove_file(&path);
     }
@@ -160,7 +195,7 @@ mod tests {
     #[test]
     fn an_object_that_is_not_a_frame_is_refused() {
         let path = temp("notframe", r#"{"foo":1,"bar":2}"#);
-        let e = collection_from_json(&path).unwrap_err();
+        let e = read(&path).unwrap_err();
         let msg = e.to_string();
         assert!(
             msg.contains("foo") && msg.contains("bar"),
@@ -170,7 +205,7 @@ mod tests {
 
         let empty = temp("empty", "{}");
         assert!(
-            collection_from_json(&empty).is_err(),
+            read(&empty).is_err(),
             "an empty object is not an empty trace"
         );
         let _ = std::fs::remove_file(&empty);
@@ -178,7 +213,7 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_a_usage_error_naming_the_path() {
-        let e = collection_from_json("/nonexistent/necropsy-trace.json").unwrap_err();
+        let e = read("/nonexistent/necropsy-trace.json").unwrap_err();
         assert!(
             e.to_string().contains("/nonexistent/necropsy-trace.json"),
             "{e}"

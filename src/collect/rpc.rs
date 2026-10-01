@@ -31,61 +31,158 @@ impl<R: Rpc + ?Sized> Rpc for &R {
     }
 }
 
-#[derive(Debug, Clone)]
+/// The largest response necropsy will read, in bytes, unless `--max-response-mb` says
+/// otherwise. Measured across the 16 mainnet transactions in the live record, the biggest
+/// `callTracer` answer is 62 KB, so this is ~500x the largest real answer the tool has ever
+/// had to work with — and one number short of "unlimited", which is `ureq`'s default and
+/// means a gateway HTML page, a mispointed URL or a hostile endpoint decides this process's
+/// memory.
+pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// How deep a JSON document may nest before it is refused, unless `--max-trace-depth` says
+/// otherwise. `serde_json`'s own limit is 128 and is disabled here, because a genuine
+/// reentrancy trace nests past it and the resulting *parse* error reads as "this is not
+/// JSON" rather than as the depth problem it is. 2,048 costs roughly a megabyte of stack on
+/// the collection thread (256 MiB), which is the budget that decides it.
+pub const DEFAULT_MAX_TRACE_DEPTH: usize = 2048;
+
+#[derive(Clone)]
 pub struct HttpRpc {
     url: String,
     redactor: Redactor,
-    timeout: Duration,
     retries: u32,
+    max_bytes: u64,
+    max_depth: usize,
+    agent: ureq::Agent,
+}
+
+/// Statuses worth a second attempt. A rate limit and a shed are answers about *load*;
+/// re-asking is the whole point of them, and they are exactly what a public endpoint gives
+/// you at 03:00 when you are working an incident.
+fn retryable_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
 }
 
 impl HttpRpc {
     pub fn new(url: &str, timeout: Duration, retries: u32) -> Self {
-        HttpRpc {
-            url: url.to_string(),
-            redactor: Redactor::from_url(url),
+        HttpRpc::with_limits(
+            url,
             timeout,
             retries,
-        }
+            DEFAULT_MAX_RESPONSE_BYTES,
+            DEFAULT_MAX_TRACE_DEPTH,
+        )
     }
 
-    fn send_once(&self, body: &Value) -> std::result::Result<Value, ureq::Error> {
-        let mut config = ureq::config::Config::builder().timeout_per_call(Some(self.timeout));
+    /// The bounds are constructor arguments rather than globals because the offline suites
+    /// and `examples/` must be able to ask for a *smaller* one and watch it fire.
+    pub fn with_limits(
+        url: &str,
+        timeout: Duration,
+        retries: u32,
+        max_bytes: u64,
+        max_depth: usize,
+    ) -> Self {
+        let mut config = ureq::config::Config::builder()
+            .timeout_per_call(Some(timeout))
+            // necropsy is a forensics tool that scripts against exit codes. A 404 has to
+            // arrive as a response the caller can read the status of, not as an error that
+            // has already thrown the headers away — which is also where `Retry-After` lives.
+            .http_status_as_error(false)
+            // Says who is asking, in terms an endpoint operator can act on. Rate limits are
+            // often set from the UA, and "unknown client" is not recoverable after the fact.
+            .user_agent(concat!("necropsy/", env!("CARGO_PKG_VERSION")));
         // `cast` does system-proxy detection and so must we, or the same
         // --rpc-url works under one tool and not the other.
         if let Some(p) = ureq::Proxy::try_from_env() {
             config = config.proxy(Some(p));
         }
-        let agent = ureq::Agent::new_with_config(config.build());
-        let mut resp = agent.post(&self.url).send_json(body)?;
-        resp.body_mut().read_json::<Value>()
+        HttpRpc {
+            url: url.to_string(),
+            redactor: Redactor::from_url(url),
+            retries,
+            max_bytes,
+            max_depth,
+            // One agent, cloned per call: `Agent::clone` is documented cheap, and building
+            // a fresh agent per request put a full TLS handshake on every one of a
+            // deliberately *sequential* client.
+            agent: ureq::Agent::new_with_config(config.build()),
+        }
     }
+
+    /// Read at most `max_bytes + 1`, so "exactly at the limit" and "over it" are different
+    /// observable facts rather than one silent truncation.
+    fn read_capped(
+        &self,
+        resp: &mut ureq::http::Response<ureq::Body>,
+    ) -> std::result::Result<Vec<u8>, ureq::Error> {
+        use std::io::Read;
+        let mut reader = resp.body_mut().as_reader();
+        let mut buf = Vec::new();
+        reader
+            .by_ref()
+            .take(self.max_bytes.saturating_add(1))
+            .read_to_end(&mut buf)?;
+        Ok(buf)
+    }
+
+    /// A transport fault, in one line and with the credential out of it.
+    fn transport_error(&self, e: &impl std::fmt::Display) -> String {
+        self.redactor.first_line(&e.to_string())
+    }
+
+    /// Parse under the shared depth guard. The ordering that matters — measure, then
+    /// switch off the parser's own limit — is documented on
+    /// [`crate::collect::depth::bounded_value`].
+    fn parse_capped(&self, bytes: &[u8], _method: &str) -> Result<Value> {
+        crate::collect::depth::bounded_value(bytes, self.max_depth)
+    }
+}
+
+/// One attempt, sorted into what a retry loop can use.
+enum Attempt {
+    Answer(Value),
+    /// The endpoint answered something necropsy will not read. Asking again cannot change
+    /// that, so it ends the loop and keeps its own exit status.
+    Fatal(Error),
+    /// Transport, or a status that says "try later".
+    Retry(String),
+    /// A status that says "try later", with the endpoint's own number of seconds attached.
+    Wait(String, Option<u64>),
 }
 
 impl Rpc for HttpRpc {
     fn request(&self, method: &str, params: &[Value]) -> Result<Value> {
         let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-        let mut last: Option<Error> = None;
+        let mut last = Error::Rpc(format!("{method}: failed with no error value"));
         for attempt in 0..=self.retries {
-            match self.send_once(&body) {
-                Ok(value) => return parse_envelope(value, method, &self.redactor),
-                Err(e) => {
-                    // A 4xx/5xx is a deterministic answer: retrying it just makes
-                    // a failed run slower. Only transport faults retry.
-                    let retryable = !matches!(e, ureq::Error::StatusCode(_));
-                    let msg = self.redactor.first_line(&e.to_string());
-                    last = Some(match e {
-                        ureq::Error::StatusCode(status) => Error::Http { status },
-                        _ => Error::Rpc(msg),
-                    });
-                    if !retryable || attempt == self.retries {
+            match self.send_once(&body, method) {
+                Attempt::Answer(value) => return Ok(value),
+                Attempt::Fatal(e) => return Err(e),
+                Attempt::Retry(why) => last = Error::Rpc(why),
+                Attempt::Wait(why, after) => {
+                    last = Error::Rpc(why);
+                    if attempt == self.retries {
                         break;
                     }
-                    std::thread::sleep(Duration::from_millis(300 * (1 << attempt)));
+                    // Backoff doubles from 300 ms; a `Retry-After` the endpoint actually sent
+                    // is honoured, but capped, because an endpoint asking for an hour is not
+                    // evidence about the transaction.
+                    let backoff = Duration::from_millis(300 * (1 << attempt));
+                    let wait = after
+                        .map(|s| Duration::from_secs(s.min(15)))
+                        .unwrap_or(backoff)
+                        .max(backoff);
+                    std::thread::sleep(wait);
+                    continue;
                 }
             }
+            if attempt == self.retries {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300 * (1 << attempt)));
         }
-        Err(last.unwrap_or_else(|| Error::Rpc(format!("{method}: failed with no error value"))))
+        Err(last)
     }
 
     fn describe(&self) -> String {
@@ -97,6 +194,53 @@ impl Rpc for HttpRpc {
             .map(|(_, r)| r.split(['/', '?']).next().unwrap_or(r))
             .unwrap_or(&self.url);
         self.redactor.redact(host)
+    }
+}
+
+impl HttpRpc {
+    fn send_once(&self, body: &Value, method: &str) -> Attempt {
+        let mut resp = match self.agent.post(&self.url).send_json(body) {
+            Ok(resp) => resp,
+            Err(e) => return Attempt::Retry(self.transport_error(&e)),
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let why = format!("{method}: http status {status}");
+            // `Retry-After` in delta-seconds. The HTTP-date form would need a clock and a
+            // parser for a header almost no RPC gateway sends, so an unreadable value is
+            // treated as absent — which is the same outcome as never having asked.
+            let after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok());
+            let code = status.as_u16();
+            return if retryable_status(code) {
+                Attempt::Wait(why, after)
+            } else {
+                Attempt::Fatal(Error::Http { status: code })
+            };
+        }
+        let bytes = match self.read_capped(&mut resp) {
+            Ok(bytes) => bytes,
+            Err(e) => return Attempt::Retry(self.transport_error(&e)),
+        };
+        // One byte past the cap is the proof the cap bit, and the reason this is Fatal
+        // rather than a retry: asking again gets the same oversized answer.
+        if bytes.len() as u64 > self.max_bytes {
+            return Attempt::Fatal(Error::ResponseTooLarge {
+                limit: self.max_bytes,
+            });
+        }
+        match self.parse_capped(&bytes, method) {
+            Ok(value) => match parse_envelope(value, method, &self.redactor) {
+                // A JSON-RPC error envelope is an *answer*, including -32601, which is how
+                // `auto` knows to switch collectors. Only transport faults retry.
+                Ok(result) => Attempt::Answer(result),
+                Err(e) => Attempt::Fatal(e),
+            },
+            Err(e) => Attempt::Fatal(e),
+        }
     }
 }
 

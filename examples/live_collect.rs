@@ -39,6 +39,7 @@ fn main() {
 
     let rpc = std::sync::Arc::new(HttpRpc::new(&url, Duration::from_secs(60), 2));
     let cfg = castbin::CastConfig {
+        max_bytes: necropsy::collect::rpc::DEFAULT_MAX_RESPONSE_BYTES,
         rpc_url: url.clone(),
         timeout: Duration::from_secs(120),
         mode: CastMode::Rendered,

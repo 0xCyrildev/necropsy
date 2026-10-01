@@ -9,7 +9,8 @@ use crate::error::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
-    /// Collected and analyzed, nothing at or above `--fail-on`.
+    /// Collected and analyzed. `Findings` is the only code this tool never returns
+    /// from `run()` — see the note there about why a severity model has to exist first.
     Ok = 0,
     /// Collected and analyzed, with findings at or above the configured level.
     Findings = 1,
@@ -30,15 +31,20 @@ impl Exit {
     /// Map a failure to a status. Note that a *transaction* that reverted is not
     /// an error at all — analyzing a failed transaction is the point of the tool,
     /// so that path returns a report and exits on findings, never here.
+    ///
+    /// `Usage` is reserved for reasons the operator can fix by editing the command line.
+    /// An HTTP status is not one of them: a load balancer answering 404 for a healthy
+    /// node, or a gateway answering 400 for a request it refused to forward, says
+    /// something about the path between, and a caller that was told "your flags are
+    /// wrong" will go re-read the manual instead of the endpoint.
     pub fn from_error(e: &Error) -> Exit {
         match e {
             Error::NoRpcUrl
             | Error::BadTxHash { .. }
             | Error::Input { .. }
-            | Error::MixedSource { .. }
-            | Error::Http {
-                status: 400..=404, ..
-            } => Exit::Usage,
+            | Error::MixedSource { .. } => Exit::Usage,
+            // Everything else is an answer from outside: transport, status, a body too
+            // large or too deep to read, an absent transaction.
             _ => Exit::Unavailable,
         }
     }
