@@ -59,6 +59,7 @@ jobs:
           set -euo pipefail
           for f in scripts/*.mjs npm/cli/bin/necropsy.js; do node --check "$f"; done
           node scripts/check-versions.mjs
+          node scripts/check-workflow-ids.mjs
           node scripts/write-manifests.mjs >/dev/null
           git diff --exit-code npm/ || {
             echo "npm manifests do not match Cargo.toml/scripts/targets.mjs -- run: node scripts/write-manifests.mjs"

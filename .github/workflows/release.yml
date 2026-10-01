@@ -34,7 +34,12 @@ jobs:
       # The build matrix is generated from scripts/targets.mjs -- the same module that generates
       # the npm package manifests. A target that exists in CI but not in npm, or the other way
       # round, is the bug that makes a release asset impossible to install.
-      - name: Matrix
+      # The `id` is load-bearing, and this workflow shipped without it for one commit: the job
+      # output reads `steps.matrix.outputs.matrix`, and an unnamed step has no addressable outputs,
+      # so the value came back empty, the matrix expanded to zero jobs, and every step still
+      # reported success.
+      - id: matrix
+        name: Matrix
         run: node scripts/release-matrix.mjs >> "$GITHUB_OUTPUT"
 
       - name: Report what the matrix expanded to
@@ -44,6 +49,10 @@ jobs:
           set -euo pipefail
           echo "raw output: ${MATRIX:0:200}…"
           echo "length: ${#MATRIX}"
+          if [ -z "$MATRIX" ]; then
+            echo "::error::steps.matrix.outputs.matrix is empty — is the Matrix step's id set?"
+            exit 1
+          fi
           count=$(printf %s "$MATRIX" | node -e '
             let s = "";
             process.stdin.on("data", (d) => (s += d)).on("end", () => {
@@ -57,12 +66,14 @@ jobs:
           fi
           echo "matrix-count=$count" >> "$GITHUB_OUTPUT"
 
-      - name: Version
+      - id: version
+        name: Version
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           v=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          [ -n "$v" ] || { echo "::error::could not read a version out of Cargo.toml"; exit 1; }
           echo "Cargo.toml says $v"
           # The tag is checked against the crate, not against a human's memory of it.
           if [ "$EVENT_NAME" = "push" ]; then
