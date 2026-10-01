@@ -18,6 +18,9 @@ const include = TARGETS.map((t) => ({
   system: t.system === true,
   apt: t.apt ?? [],
   linker: t.linker ?? "",
+  cc: t.cc ?? "",
+  ar: t.ar ?? "",
+  qemu: t.qemu ?? "",
 }));
 
 // Always print, never write the file directly: the workflow redirects stdout into GITHUB_OUTPUT, so

@@ -46,8 +46,16 @@ export const TARGETS = [
     rustArch: "aarch64",
     libc: "glibc",
     runner: "ubuntu-24.04",
-    apt: ["gcc-aarch64-linux-gnu"],
+    // The cross *compiler* is not enough: `ring` (pulled in by rustls) compiles C, and it needs
+    // the target's libc headers to do it. Without `libc6-dev-arm64-cross` the build dies on
+    // `bits/libc-header-start.h: No such file`, which reads like a linker problem and is not one.
+    // qemu-user-static is here so the Verify step can execute the arm64 binary rather than only
+    // inspect it -- a header cannot tell a real aarch64 build from a renamed x86_64 one.
+    apt: ["gcc-aarch64-linux-gnu", "libc6-dev-arm64-cross", "qemu-user-static"],
     linker: "aarch64-linux-gnu-gcc",
+    cc: "aarch64-linux-gnu-gcc",
+    ar: "aarch64-linux-gnu-ar",
+    qemu: "qemu-aarch64 -L /usr/aarch64-linux-gnu",
   },
   {
     npmName: "@0xcyrildev/necropsy-darwin-arm64",
