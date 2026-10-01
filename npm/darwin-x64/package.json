@@ -1,0 +1,22 @@
+{
+  "name": "@0xcyrildev/necropsy-darwin-x64",
+  "version": "0.2.0",
+  "description": "necropsy binary for darwin/x64",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/necropsy",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0xCyrildev/necropsy.git"
+  },
+  "homepage": "https://github.com/0xCyrildev/necropsy#readme"
+}

@@ -53,6 +53,11 @@ pub enum Error {
     /// `ETH_RPC_URL` is configuration that happens to be set; `--rpc-url` is a sentence
     /// about *this* run. The first can coexist with `--from-json`, the second contradicts
     /// it, and neither is printed here — the endpoint may carry a credential.
+    #[error(
+        "--build-info describes this binary; {tx} asks about a transaction. One question per run"
+    )]
+    MixedBuildInfo { tx: String },
+
     #[error("--from-json {path:?} and --rpc-url name two sources for one run; pass one")]
     MixedSource { path: String },
 

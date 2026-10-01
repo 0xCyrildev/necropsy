@@ -1,5 +1,17 @@
 /target
 .env
+# Build and packaging outputs. `dist/` holds the per-target binaries, and `npm/<platform>/bin/`
+# holds the copy pack-npm.mjs places for `npm pack`. Neither is source: a binary committed here
+# would be an artifact nobody can trace to a build. Patterns are file-level on purpose — `npm/*/bin/`
+# would also have swallowed `npm/cli/bin/necropsy.js`, which *is* source, and CI would have run
+# against a checkout with no launcher in it.
+/dist
+npm/*/bin/necropsy
+npm/*/bin/necropsy.exe
+npm/*/LICENSE
+npm/*/README.md
+node_modules/
+*.tgz
 # Cargo.lock is committed. This crate ships a binary, and `cargo build` without a lockfile
 # resolves against whatever the registry index says today -- so "the same commit" is not the
 # same program, and a CI green light can arrive from a dependency nobody reviewed. Library

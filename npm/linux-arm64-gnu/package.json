@@ -1,0 +1,23 @@
+{
+  "name": "@0xcyrildev/necropsy-linux-arm64-gnu",
+  "version": "0.2.0",
+  "description": "necropsy binary for linux/arm64 (glibc)",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "libc": "glibc",
+  "files": [
+    "bin/necropsy",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0xCyrildev/necropsy.git"
+  },
+  "homepage": "https://github.com/0xCyrildev/necropsy#readme"
+}

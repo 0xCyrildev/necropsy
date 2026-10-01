@@ -1,0 +1,121 @@
+name: publish-npm
+
+# Manual, guarded, and dry-run by default. Nothing in this repository publishes a package because
+# a tag was pushed or a commit landed: an artifact that reaches a package manager on a git event
+# is the supply-chain shape that gets exploited. Someone chooses to publish, and says so.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, e.g. 0.3.0 (must already have a GitHub Release)"
+        required: true
+        type: string
+      dryRun:
+        description: "Stop before uploading: verify the tarballs and their provenance only"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  # Needed for npm's trusted-publisher flow: the registry is told by GitHub who built these bytes,
+  # so no long-lived NPM_TOKEN has to exist anywhere.
+  id-token: write
+
+# One publish at a time, and never auto-expire a half-run.
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+# Requires an `npm` environment to exist on the repository. Without it the workflow fails here
+# rather than half-publishing.
+environment: npm
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Check the version against the crate
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # Validated before it reaches any command line: this arrives from a dispatch payload, and
+          # `npm publish … $VERSION` would otherwise be an argument someone typed into a shell.
+          printf %s\\n "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || {
+            echo "::error::version \"$VERSION\" is not a bare semver string"
+            exit 1
+          }
+          crate=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "requesting $VERSION, Cargo.toml says $crate"
+          [ "$VERSION" = "$crate" ] || {
+            echo "::error::npm version $VERSION != Cargo.toml $crate — publish the version the code says it is"
+            exit 1
+          }
+
+      - name: Download the release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl
+          gh release download "v$VERSION" --pattern '*.tgz' --pattern 'SHA256SUMS.txt' --dir dl
+          ls -l dl
+
+      - name: Verify every tarball against the release checksum
+        run: |
+          set -euo pipefail
+          cd dl
+          # The manifest covers both .tar.gz and .tgz; check only the lines for files that exist
+          # here, and fail if a listed file is absent.
+          grep '\.tgz$' SHA256SUMS.txt > npm.sum || { echo "no npm tarballs in SHA256SUMS.txt"; exit 1; }
+          while read -r sum name; do
+            [ -f "$name" ] || { echo "release is missing $name"; exit 1; }
+          done < npm.sum
+          sha256sum -c npm.sum
+          echo "$(wc -l < npm.sum) npm packages verified"
+
+      - name: Publish
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DRY: ${{ inputs.dryRun }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          node --version && npm --version
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "//registry.npmjs.org/:_authToken=\${NPM_TOKEN}" > ~/.npmrc
+            echo "authenticating with NPM_TOKEN from the environment"
+          else
+            echo "no NPM_TOKEN: publishing relies on npm trusted publishing (OIDC), which must be"
+            echo "configured per package on the npm side beforehand."
+          fi
+          cd "$GITHUB_WORKSPACE"
+          # The publish order comes from scripts/targets.mjs, the same module that defines the
+          # packages — so a target added there is published, and one renamed here cannot quietly
+          # go missing. Platform packages first: the launcher's optionalDependencies have to
+          # resolve against versions that already exist in the registry. The launcher is last.
+          node --input-type=module -e '
+            const { TARGETS } = await import("./scripts/targets.mjs");
+            const v = process.env.VERSION;
+            for (const t of TARGETS) console.log(`0xcyrildev-necropsy-${t.dir}-${v}.tgz`);
+            console.log(`0xcyrildev-necropsy-${v}.tgz`);
+          ' > /tmp/publish-order.txt
+          cat /tmp/publish-order.txt
+          cd dl
+          while read -r t; do
+            [ -f "$t" ] || { echo "missing $t — the release does not contain every package"; exit 1; }
+          done < /tmp/publish-order.txt
+          args=(--access public --provenance)
+          if [ "$DRY" = "true" ]; then
+            echo "::notice::dry run — nothing is uploaded"
+            args+=(--dry-run)
+          fi
+          while read -r t; do
+            echo "publishing $t"
+            npm publish "${args[@]}" "$t"
+          done < /tmp/publish-order.txt

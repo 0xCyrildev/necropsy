@@ -1,0 +1,37 @@
+{
+  "name": "@0xcyrildev/necropsy",
+  "version": "0.2.0",
+  "description": "Post-transaction forensics for EVM chains: reconstruct the call tree and rank where value ended up",
+  "bin": {
+    "necropsy": "bin/necropsy.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@0xcyrildev/necropsy-linux-x64-gnu": "0.2.0",
+    "@0xcyrildev/necropsy-linux-x64-musl": "0.2.0",
+    "@0xcyrildev/necropsy-linux-arm64-gnu": "0.2.0",
+    "@0xcyrildev/necropsy-darwin-arm64": "0.2.0",
+    "@0xcyrildev/necropsy-darwin-x64": "0.2.0"
+  },
+  "files": [
+    "bin/necropsy.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "ethereum",
+    "evm",
+    "forensics",
+    "transaction",
+    "call-tracer",
+    "incident-response"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0xCyrildev/necropsy.git"
+  },
+  "homepage": "https://github.com/0xCyrildev/necropsy#readme"
+}

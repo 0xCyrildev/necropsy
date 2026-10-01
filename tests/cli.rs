@@ -380,6 +380,53 @@ fn a_file_larger_than_the_read_limit_is_refused_before_it_is_parsed() {
 }
 
 #[test]
+fn build_info_answers_without_a_transaction_and_refuses_with_one() {
+    // A packaging tool asks this to prove it unpacked the right binary, so it has to work with no
+    // positional argument at all -- and it must not quietly ignore a hash someone also typed.
+    necropsy()
+        .arg("--build-info")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"tool\": \"necropsy\""))
+        .stdout(predicate::str::contains("\"schema_version\""));
+
+    necropsy()
+        .arg("--build-info")
+        .arg(HASH)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("One question per run"));
+
+    // No transaction and no --build-info is still a usage error, not an empty report.
+    necropsy()
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("<TX>"));
+}
+
+#[test]
+fn build_info_reports_the_platform_the_binary_was_built_for() {
+    // os/arch are read from the running process, which is the point: the value cannot be a string
+    // the build system wrote into a manifest and then got wrong.
+    necropsy()
+        .arg("--build-info")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "\"os\": \"{}\"",
+            std::env::consts::OS
+        )))
+        .stdout(predicate::str::contains(format!(
+            "\"arch\": \"{}\"",
+            std::env::consts::ARCH
+        )))
+        .stdout(predicate::str::contains(format!(
+            "\"version\": \"{}\"",
+            env!("CARGO_PKG_VERSION")
+        )));
+}
+
+#[test]
 fn a_reader_that_went_away_is_not_a_failed_run() {
     // `necropsy … | head -2` closes the pipe while the report is still being written. Rust
     // ignores SIGPIPE, so that arrives as an EPIPE *write error*, and `println!` panics:

@@ -50,6 +50,58 @@ jobs:
       - name: Test
         run: cargo test --all-targets --locked
 
+      # The npm layer, checked rather than assumed. Each step answers a question that would
+      # otherwise only surface for a user: do the manifests agree with the crate, does the asset
+      # verification catch a wrong header, and does the launcher actually exec the binary and hand
+      # back its exit status?
+      - name: Packaging
+        run: |
+          set -euo pipefail
+          for f in scripts/*.mjs npm/cli/bin/necropsy.js; do node --check "$f"; done
+          node scripts/check-versions.mjs
+          node scripts/write-manifests.mjs >/dev/null
+          git diff --exit-code npm/ || {
+            echo "npm manifests do not match Cargo.toml/scripts/targets.mjs -- run: node scripts/write-manifests.mjs"
+            exit 1
+          }
+
+      - name: Launcher contract
+        run: |
+          set -euo pipefail
+          cargo build --release --locked
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          version=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          node scripts/verify-asset.mjs "$triple" "target/release/necropsy" "$version"
+
+          # A negative control, and it only means something on an x86_64 host: an x86_64 ELF
+          # presented as aarch64 must be rejected. Without this, a header check that always returns
+          # "looks fine" would pass CI forever.
+          case "$triple" in
+            x86_64-unknown-linux-gnu)
+              if node scripts/verify-asset.mjs aarch64-unknown-linux-gnu target/release/necropsy >/dev/null 2>&1; then
+                echo "verify-asset accepted an x86_64 ELF as aarch64"; exit 1
+              fi
+              echo "verify-asset rejected a wrong target"
+              ;;
+          esac
+
+          # A node_modules layout the way npm would build it: the launcher resolves its platform
+          # package by name, so a symlink farm or a copy is the honest test, not a patched path.
+          stage=$(mktemp -d)
+          mkdir -p "$stage/node_modules/@0xcyrildev/necropsy-linux-x64-gnu/bin"
+          cp -R npm/cli "$stage/node_modules/@0xcyrildev/necropsy"
+          cp npm/linux-x64-gnu/package.json "$stage/node_modules/@0xcyrildev/necropsy-linux-x64-gnu/"
+          cp target/release/necropsy "$stage/node_modules/@0xcyrildev/necropsy-linux-x64-gnu/bin/necropsy"
+          chmod +x "$stage/node_modules/@0xcyrildev/necropsy-linux-x64-gnu/bin/necropsy"
+
+          run() { NODE_PATH="$stage/node_modules" node "$stage/node_modules/@0xcyrildev/necropsy/bin/necropsy.js" "$@"; }
+          run --build-info | grep -q '"tool": "necropsy"'
+          rc=0; run --from-json tests/fixtures/usdc-transfer-18214590.calltracer.json 0x5b515946dc1177149f140777ac90879312b182117e3392e8e2703ed3cd697153 >/dev/null || rc=$?
+          [ "$rc" -eq 4 ] || { echo "a file-only run through the wrapper must exit 4, got $rc"; exit 1; }
+          rc=0; run nonsense >/dev/null 2>&1 || rc=$?
+          [ "$rc" -eq 2 ] || { echo "a bad command line through the wrapper must exit 2, got $rc"; exit 1; }
+          echo "launcher resolves the platform package and propagates 0 / 2 / 4"
+
       # The declared MSRV is a promise, and a promise CI does not exercise is a lie waiting for a
       # user. 1.90 is not this crate's own floor -- edition 2024 needs only 1.85 -- it is `ruint`'s,
       # read from the vendored manifest (registry `ruint-1.20.1/Cargo.toml`:

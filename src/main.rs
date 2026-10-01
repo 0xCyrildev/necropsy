@@ -31,7 +31,16 @@ use std::time::Duration;
 )]
 struct Args {
     /// Transaction hash: 0x plus 64 hex digits.
-    tx: String,
+    #[arg(required_unless_present = "build_info")]
+    tx: Option<String>,
+
+    /// Print what this binary is, as JSON, and stop: version, the `--json` document's schema
+    /// version, and the platform the code was compiled for. A package manager that unpacks a
+    /// per-platform binary needs a way to prove it unpacked the right one, and `--version`
+    /// cannot say that — it is a string the build system wrote, not a fact the running code
+    /// can observe. `os` and `arch` here are the ones this process is executing on.
+    #[arg(long)]
+    build_info: bool,
 
     /// A second transaction from the same endpoint, to compare the call tree against.
     /// Structural only: it reports shape differences and compares no amounts, so a
@@ -184,6 +193,27 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// What this binary is, in one JSON document. Written by hand rather than through a serializer
+/// so there is no failure path in a function a package manager calls to decide whether to trust
+/// the file it just unpacked.
+fn build_info() -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"tool\": \"necropsy\",\n",
+            "  \"version\": \"{}\",\n",
+            "  \"schema_version\": {},\n",
+            "  \"os\": \"{}\",\n",
+            "  \"arch\": \"{}\"\n",
+            "}}",
+        ),
+        env!("CARGO_PKG_VERSION"),
+        necropsy::report::SCHEMA_VERSION,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
+}
+
 enum Write {
     Done,
     Gone,
@@ -216,7 +246,20 @@ fn write_with(mut stream: impl std::io::Write, text: &str) -> Write {
 }
 
 fn run(args: &Args, endpoint_named: bool) -> Result<(String, Exit)> {
-    let hash = necropsy::collect::txdata::parse_tx_hash(&args.tx)?;
+    // Asked first, because it is a question about the binary rather than the chain: no flags
+    // about endpoints, files or transactions are consulted, and none are silently ignored.
+    if args.build_info {
+        if let Some(tx) = args.tx.as_deref() {
+            return Err(Error::MixedBuildInfo { tx: tx.to_string() });
+        }
+        return Ok((build_info(), Exit::Ok));
+    }
+    // clap guarantees a hash when `--build-info` was not given, so this arm only fires if that
+    // guarantee broke -- which is a defect in this binary, not a bad command line.
+    let Some(tx) = args.tx.as_deref() else {
+        return Err(Error::Collect("no transaction hash reached the run".into()));
+    };
+    let hash = necropsy::collect::txdata::parse_tx_hash(tx)?;
     // Parsed up front, with the target: a typo in the *second* hash should cost a
     // usage error immediately, not a transaction fetch that then gets thrown away.
     let baseline_hash = args

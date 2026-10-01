@@ -1,0 +1,24 @@
+# How `gh release create --generate-notes` groups pull requests. Without this file GitHub lumps
+# everything under "Other", so the notes say nothing about what changed.
+changelog:
+  exclude:
+    - labels:
+        - skip-release-notes
+        - ci
+  categories:
+    - title: Breaking
+      labels:
+        - breaking
+    - title: Added
+      labels:
+        - enhancement
+        - feature
+    - title: Fixed
+      labels:
+        - bug
+        - regression
+    - title: Security
+      labels:
+        - security
+  # Comprehensive, not a curated subset: the commits in a necropsy release are mostly the PR/commit
+  # subjects themselves, and a reader of a forensics tool wants the honest list.

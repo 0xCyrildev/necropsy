@@ -1,0 +1,23 @@
+{
+  "name": "@0xcyrildev/necropsy-linux-x64-musl",
+  "version": "0.2.0",
+  "description": "necropsy binary for linux/x64 (musl)",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": "musl",
+  "files": [
+    "bin/necropsy",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0xCyrildev/necropsy.git"
+  },
+  "homepage": "https://github.com/0xCyrildev/necropsy#readme"
+}

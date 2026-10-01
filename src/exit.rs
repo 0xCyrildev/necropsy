@@ -42,7 +42,8 @@ impl Exit {
             Error::NoRpcUrl
             | Error::BadTxHash { .. }
             | Error::Input { .. }
-            | Error::MixedSource { .. } => Exit::Usage,
+            | Error::MixedSource { .. }
+            | Error::MixedBuildInfo { .. } => Exit::Usage,
             // Everything else is an answer from outside: transport, status, a body too
             // large or too deep to read, an absent transaction.
             _ => Exit::Unavailable,

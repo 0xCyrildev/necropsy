@@ -1,0 +1,202 @@
+name: release
+
+# Tag-triggered artifacts, and a dispatch path that builds the identical set while publishing
+# nothing. The rehearsal matters: a release workflow whose first run is also its first test is a
+# release that fails in front of everyone.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      # Pinned by commit, like every other action here: a tag on an action can be repointed at
+      # different bytes with no diff anybody reads.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # The build matrix is generated from scripts/targets.mjs -- the same module that generates
+      # the npm package manifests. A target that exists in CI but not in npm, or the other way
+      # round, is the bug that makes a release asset impossible to install.
+      - name: Matrix
+        run: node scripts/release-matrix.mjs >> "$GITHUB_OUTPUT"
+
+      - name: Version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          v=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml says $v"
+          # The tag is checked against the crate, not against a human's memory of it.
+          if [ "$EVENT_NAME" = "push" ]; then
+            if [ "$GITHUB_REF_NAME" != "v$v" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version v$v"
+              exit 1
+            fi
+          fi
+
+  build:
+    needs: plan
+    strategy:
+      # One target failing must not hide whether the other four built, and it must not publish.
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # The same pinned toolchain as ci.yml, so the bytes released are the bytes linted and tested.
+      - name: Toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+          rustc --version
+
+      # Cross toolchains come from the distro's own packages: one linker each, nothing fetched
+      # from a script. qemu-user-static is here so the arm64 asset can be *executed* on an x86_64
+      # runner instead of only inspected -- a header check alone cannot tell a real aarch64 binary
+      # from an x86_64 one that somebody renamed.
+      - name: Cross toolchain
+        if: ${{ join(matrix.apt, '') != '' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ join(matrix.apt, ' ') }}
+
+      - name: Rust target
+        if: ${{ !matrix.system }}
+        run: rustup target add ${{ matrix.cargoTarget }}
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.linker }}" ]; then
+            key=$(echo "${{ matrix.cargoTarget }}" | tr 'a-z-' 'A-Z_')
+            export "CARGO_TARGET_${key}_LINKER=${{ matrix.linker }}"
+          fi
+          cargo build --release --locked --target ${{ matrix.cargoTarget }}
+          ls -l "target/${{ matrix.cargoTarget }}/release/necropsy"
+
+      - name: Verify this asset is the target it claims
+        env:
+          NECROPSY_QEMU: ${{ matrix.cpu == 'arm64' && matrix.os == 'linux' && runner.os == 'Linux' && 'qemu-aarch64 -L /usr/aarch64-linux-gnu' || '' }}
+        run: node scripts/verify-asset.mjs "${{ matrix.cargoTarget }}" "target/${{ matrix.cargoTarget }}/release/necropsy" "${{ needs.plan.outputs.version }}"
+
+      - name: Stage
+        run: |
+          set -euo pipefail
+          v="${{ needs.plan.outputs.version }}"
+          t="${{ matrix.cargoTarget }}"
+          dir="necropsy-$v-$t"
+          mkdir -p stage/"$dir"
+          cp "target/$t/release/necropsy" LICENSE README.md stage/"$dir"/
+          # Deterministic archive: fixed mtime, fixed order, sorted entries, so two runs of one
+          # commit produce the same bytes and a checksum change means a content change.
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+              -C stage -czf "stage/$dir.tar.gz" "$dir"
+          (cd stage && sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256" && sha256sum -c "$dir.tar.gz.sha256")
+          cp LICENSE README.md stage/
+          ls -l stage
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: assets-${{ matrix.dir }}
+          path: stage/
+          if-no-files-found: error
+
+  assemble:
+    # Runs on both triggers. On a dispatch this is the rehearsal: everything except the publish.
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: assets-*
+          path: dl
+          merge-multiple: true
+
+      - name: Collect assets and checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist assets
+          mv dl/*.tar.gz dl/*.tar.gz.sha256 assets/
+          cat dl/*.tar.gz.sha256 | sort > assets/SHA256SUMS.txt
+          # Counted from scripts/targets.mjs, not hardcoded: the day a target is added, this check
+          # still means "every target produced an asset".
+          expected=$(node -e 'import("./scripts/targets.mjs").then(m => console.log(m.TARGETS.length))')
+          found=$(wc -l < assets/SHA256SUMS.txt)
+          [ "$found" -eq "$expected" ] || { echo "expected $expected target assets, found $found"; exit 1; }
+          node --version
+          (cd assets && sha256sum -c SHA256SUMS.txt)
+          for f in assets/necropsy-*-*.tar.gz; do tar -xzf "$f" -C /tmp; done
+          v="${{ needs.plan.outputs.version }}"
+          for d in /tmp/necropsy-$v-*; do
+            t=$(basename "$d" | sed "s/^necropsy-$v-//")
+            cp "$d/necropsy" "dist/necropsy-$t"
+          done
+          ls -l dist assets
+
+      - name: npm packages from these same binaries
+        run: |
+          set -euo pipefail
+          node scripts/check-versions.mjs
+          node scripts/pack-npm.mjs dist
+          # One tarball per package, and the package list comes from the same module again.
+          node -e 'import("./scripts/targets.mjs").then(m => console.log(["cli", ...m.TARGETS.map(x => x.dir)].join("\n")))' | while read -r dir; do
+            test -f "npm/$dir/package.json" || { echo "missing npm/$dir/package.json"; exit 1; }
+            (cd "npm/$dir" && npm pack --pack-destination "$GITHUB_WORKSPACE/assets")
+          done
+          ls assets/*.tgz | wc -l
+          # The tarballs join the checksum manifest, which is then verified as a whole.
+          (cd assets && find . -maxdepth 1 -name '*.tgz' -print0 | xargs -0 sha256sum >> SHA256SUMS.txt && sort -o SHA256SUMS.txt SHA256SUMS.txt && sha256sum -c SHA256SUMS.txt)
+          ls -l assets
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ needs.plan.outputs.version }}
+          path: assets/
+          if-no-files-found: error
+
+  publish:
+    needs: [plan, assemble]
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-${{ needs.plan.outputs.version }}
+          path: assets
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          (cd assets && sha256sum -c SHA256SUMS.txt)
+          flags=(--generate-notes)
+          case "$TAG" in *-*) flags+=(--prerelease);; esac
+          gh release create "$TAG" --title "$TAG" "${flags[@]}" \
+            assets/*.tar.gz assets/*.tgz assets/SHA256SUMS.txt
+          gh release view "$TAG" --json tagName,prerelease,assets \
+            --jq '"released " + .tagName + " prerelease=" + (.prerelease|tostring) + " assets=" + (.assets|length|tostring)'

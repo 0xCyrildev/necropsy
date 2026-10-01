@@ -44,12 +44,39 @@ Still under active development — 0.x, and the answer to "can I rely on this" i
   amounts, no labels and no storage, so a row is a question for a reviewer and it never
   changes the exit status.
 
-## Build
+## Install
+
+Three ways, in order of how much you have to trust each one. See `RELEASE.md` for how they are
+built and what each contains.
+
+```sh
+# 1. from source, on a machine you control
+cargo install --git https://github.com/0xCyrildev/necropsy --tag v0.2.0
+
+# 2. a built binary, with its checksum
+curl -sSL -O https://github.com/0xCyrildev/necropsy/releases/download/v0.2.0/necropsy-0.2.0-x86_64-unknown-linux-gnu.tar.gz
+sha256sum -c <(curl -sSL https://github.com/0xCyrildev/necropsy/releases/download/v0.2.0/SHA256SUMS.txt)   necropsy-0.2.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf necropsy-0.2.0-x86_64-unknown-linux-gnu.tar.gz && ./necropsy-0.2.0-x86_64-unknown-linux-gnu/necropsy --build-info
+
+# 3. through npm, which fetches nothing at install time
+npm install -g @0xcyrildev/necropsy && necropsy --build-info
+```
+
+`necropsy --build-info` prints the version, the `--json` schema version, and the platform the
+binary reports itself as running on. Run it after any install: it is the one command that proves
+the thing you installed is the thing you meant to install.
 
 ```sh
 cargo build --release
 ./target/release/necropsy --rpc-url "$ETH_RPC_URL" 0x5b515946dc1177149f140777ac90879312b182117e3392e8e2703ed3cd697153
 ```
+
+The npm packages exist under the `@0xcyrildev` scope because the bare name `necropsy` on npm is
+someone else's package — a Node core-dump debugger, unrelated and older. The distribution is the
+esbuild shape: a launcher plus one package per platform selected by npm's `os`/`cpu` fields, with
+**no `postinstall` and no download during install**. Linux x86_64 (glibc and musl), Linux arm64
+(glibc), macOS arm64 and x86_64 are built; **Windows is not**, and that is stated rather than
+silently 404ing, because nothing in this tree has ever run there.
 
 `ETH_RPC_URL` is read automatically if set. The release binary links nothing but
 `libc` and `libgcc` (`ldd target/release/necropsy`); TLS is rustls, so there is no
@@ -154,6 +181,7 @@ necropsy [OPTIONS] <TX>
   --baseline-tx-hash <HASH>  compare the call tree against a second transaction
   --baseline-rpc-url <URL>  endpoint for the baseline  [default: --rpc-url]
   --from-json <PATH>   read a captured callTracer response instead of dialling a node
+  --build-info         print version, schema version and platform as JSON, then stop
   --json               machine-readable report
   --tree <N>           call-tree lines to print; 0 prints every frame  [default: 200]
   --narrative          also print a flat execution narrative  [text report only]
@@ -414,6 +442,14 @@ is exactly the sort of claim that survives an unexamined config: a workflow can 
 scheduled and still not have been triggered once. Re-check `gh api
 repos/0xCyrildev/necropsy/actions/runs?event=schedule --jq .total_count` after the next window before
 believing that half of this sentence.
+
+## Releases
+
+Tags are the only release mechanism: `vX.Y.Z` builds five platform binaries, packs the npm
+tarballs, checksums everything into one `SHA256SUMS.txt`, and publishes a GitHub Release.
+`RELEASE.md` is the runbook, including how to rehearse the pipeline as a dispatch that publishes
+nothing. The version in `Cargo.toml` is the single source of truth -- the tag, the npm manifests and
+the release assets are all checked against it, and CI fails on the disagreement.
 
 ## License
 
