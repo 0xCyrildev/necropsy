@@ -116,6 +116,33 @@ Publishing is opt-in because it needs the scope first. **Status as of `v0.2.0`: 
 attached to the release and verified by installing them from the release page, but none of them is on
 the registry yet** — the scope does not exist, so `npm install -g @0xcyrildev/necropsy` 404s.
 
+### If publishing says `404 ... Scope not found`
+
+The org does not exist yet. Create it at https://www.npmjs.com/org/create (name `0xcyrildev`; public
+packages are free), then re-run — no `npm login` needed in between, the session still works. This is
+exactly what the first publish attempt hit.
+
+Worth writing down because npm's wording overlaps: a bad credential and a missing scope both arrive as
+`E404` reading "could not be found **or you do not have permission**". The tail of the line separates
+them:
+
+| message tail | meaning |
+|---|---|
+| `Scope not found` | the org doesn't exist, or differs from the `name` field's scope |
+| `... you do not have permission` | org exists, account lacks publish rights |
+| `E401` | no valid session |
+
+Interactive publishing does **not** need an Automation token: `npm login`, then the OTP/QR prompt that
+`npm publish` raises itself, is the ordinary path. A token exists so CI can publish without a human
+approving a second factor — which is what `publish-npm.yml` is for. If npm refuses an OTP for a
+publish, the account's 2FA mode requires a granular token for publishing; that's a setting on the npm
+side, not something this repository can change.
+
+Also: never write credentials with `printf ... > ~/.npmrc`. That truncates whatever was there, and on
+a copy-paste it writes the placeholder literally. Prefer `npm login`, or an env-var reference —
+`//registry.npmjs.org/:_authToken=${NPM_TOKEN}` — so the secret never lands on disk.
+
+
 ```sh
 # one time, on npm: create the @0xcyrildev organization (or scope your user), then either add an
 # Automation token as the NPM_TOKEN secret, or — preferred — configure each package as a GitHub
