@@ -38,6 +38,12 @@ pub enum Error {
     #[error("`cast` did not finish within {0:?}")]
     CastTimeout(Duration),
 
+    /// `ETH_RPC_URL` is configuration that happens to be set; `--rpc-url` is a sentence
+    /// about *this* run. The first can coexist with `--from-json`, the second contradicts
+    /// it, and neither is printed here — the endpoint may carry a credential.
+    #[error("--from-json {path:?} and --rpc-url name two sources for one run; pass one")]
+    MixedSource { path: String },
+
     #[error("input file {path}: {message}")]
     Input { path: String, message: String },
 

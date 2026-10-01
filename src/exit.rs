@@ -35,6 +35,7 @@ impl Exit {
             Error::NoRpcUrl
             | Error::BadTxHash { .. }
             | Error::Input { .. }
+            | Error::MixedSource { .. }
             | Error::Http {
                 status: 400..=404, ..
             } => Exit::Usage,

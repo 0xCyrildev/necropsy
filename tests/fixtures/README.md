@@ -6,7 +6,7 @@ unit suites parse is built from inline strings.
 
 | File | What it is |
 |---|---|
-| `usdc-transfer-18214590.calltracer.json` | The `debug_traceTransaction` + `callTracer` **result** for tx `0x5b515946dc1177149f140777ac90879312b182117e3392e8e2703ed3cd697153` — the same transaction the README documents. Verbatim shape, unwrapped from the JSON-RPC envelope |
+| `usdc-transfer-18214590.calltracer.json` | The `debug_traceTransaction` + `callTracer` **result** for tx `0x5b515946dc1177149f140777ac90879312b182117e3392e8e2703ed3cd697153` — the same transaction the README documents. Verbatim shape, unwrapped from the JSON-RPC envelope. It is parsed twice: as a node response in `tests/fixtures.rs`, and as a file on disk by `--from-json` in `tests/cli.rs`, so the offline path is exercised against captured data rather than an imitation of it |
 | `usdc-transfer-18214590.receipt.json` | A **subset** of that transaction's `eth_getTransactionReceipt`: `logs` (only the fields the parser reads), `status`, `blockNumber`. Not a whole receipt — the fields it drops are irrelevant here, and carrying them would suggest they were tested |
 
 Both describe public Ethereum data: a transaction in block 18,214,590 that moved

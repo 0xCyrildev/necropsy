@@ -9,6 +9,26 @@ It is a reader, not a scanner. It does not guess at vulnerabilities — it answe
 question that is hard to answer from a block explorer and easy to answer badly
 from a raw `debug_traceTransaction`.
 
+## What it can do
+
+- **Rebuild the call tree** from a node's `callTracer`, from `cast`'s rendered trace, or from a
+  trace someone captured earlier (`--from-json`) — and name which of the three produced the
+  answer.
+- **Rank where value ended up**, per asset, from the receipt logs and the frame values. Amounts
+  are 256-bit integers in base units; the same amount scaled by that token's own `decimals()`
+  sits beside them, never in place of them.
+- **Classify the logs it can and list the ones it cannot**, so the size of the blind spot is in
+  the report rather than inferred by the reader.
+- **Account for every input line** — frames, emission lines, results, trailers — and say so
+  plainly when the split does not balance.
+- **Compare two transactions structurally** (`--baseline-tx-hash`, optionally read from two
+  different endpoints): which position holds which call, to whom, with which selector.
+- **Produce identical bytes for the same transaction twice**, so two people triaging one
+  incident can tell a real difference from a different tool version.
+- **Refuse to overstate.** A reverted transaction is reported as attempts. An unknown value
+  prints `value ?`. An absent artifact never becomes a zero. Exit 4 means a report was produced
+  from inputs that could not all be accounted for.
+
 ## Status
 
 Still under active development — 0.x, and the answer to "can I rely on this" is
@@ -20,8 +40,9 @@ Still under active development — 0.x, and the answer to "can I rely on this" i
   it could not account for), but the tool makes **no findings claims** — there is no
   severity, no price, and no ABI decoding, so it cannot tell you whether a transaction
   was an attack.
-- Structural comparison against a baseline transaction existed in the pre-rework binary
-  and **has no replacement yet**.
+- The baseline comparison is **shape only**: positions, callees and selectors. It reads no
+  amounts, no labels and no storage, so a row is a question for a reviewer and it never
+  changes the exit status.
 
 ## Build
 
@@ -74,6 +95,31 @@ transfer it produced is receipt log **293**. A tool that attached logs to frames
 by position would attribute them to the wrong call, so necropsy keeps the two
 artifacts in separate tables and never joins them.
 
+The same transaction read from a captured file, with no node behind it, keeps the
+shape of the report and changes what it claims:
+
+```
+necropsy 0.2.0 — via offline JSON file (no node asked; no receipt, so no token movement is known)
+  tx            0x5b515946dc1177149f140777ac90879312b182117e3392e8e2703ed3cd697153 — no transaction metadata came with this file
+  from / to / block: unknown, so nothing downstream can be attributed to an origin
+...
+  coverage    logs none supplied (no receipt came with this file) | fungible events 0
+...
+Receipt logs — a separate table, deliberately not joined to the tree
+  (no receipt was supplied with this trace — token movements are unknown, not zero)
+
+Caveats
+  - read from a local file, not a node: there is no receipt, so no token transfer is known. An empty ledger here does not mean nothing moved
+  - the transaction hash is what the operator claimed. Nothing in a bare trace ties this file to that hash.
+
+DEGRADED: some input could not be accounted for. Exit status 4.
+```
+
+The tree is real there; the money is unknown. An empty ledger and a `logs 0` would both be
+measurements of something that was never supplied, which is the failure this tool exists to
+avoid, so the absence is written as an absence and the exit status says the same thing to a
+script.
+
 ## Why the numbers are shaped this way
 
 - **Nothing is summed across assets.** A 6-decimal stablecoin and an 18-decimal
@@ -107,6 +153,7 @@ necropsy [OPTIONS] <TX>
   --cast-mode <MODE>   rendered | replay          [default: rendered]
   --baseline-tx-hash <HASH>  compare the call tree against a second transaction
   --baseline-rpc-url <URL>  endpoint for the baseline  [default: --rpc-url]
+  --from-json <PATH>   read a captured callTracer response instead of dialling a node
   --json               machine-readable report
   --tree <N>           call-tree lines to print; 0 prints every frame  [default: 200]
   --narrative          also print a flat execution narrative  [text report only]
@@ -137,6 +184,19 @@ a run asked for chain 1 stops if the baseline node answers 8453, because compari
 chain's tree against another's is exactly the mix-up the flag exists to prevent. Without
 `--chain` the comparison still runs, and the report states that the two chains differ
 rather than leaving that for the reader to notice.
+
+`--from-json` analyses a `debug_traceTransaction` response someone already has — saved during an
+incident, exported by an explorer, pasted in by a colleague. It takes the bare frame object or a
+JSON-RPC envelope, and **refuses a captured error response** rather than parsing it into an empty
+tree: a saved `-32603` is somebody's failed request, not evidence that a transaction did nothing.
+A file cannot supply what a node supplies, so the report states what is missing instead of
+printing zeros — no receipt, therefore no token movement is known and the ERC-20 side of the
+ledger is empty by absence; no transaction metadata, therefore no origin, callee or block; and
+nothing in the file ties it to the hash on the command line, which the notes say out loud. Such a
+run exits **4 (degraded)**. `--chain` cannot be honoured against a file, because a trace records
+no chain id, and the run stops rather than assuming. An `ETH_RPC_URL` left in the environment is
+ignored by this path; `--rpc-url` typed beside `--from-json` is refused, because one run has one
+source.
 
 Token decimal counts come from one `eth_call` per distinct token, at the transaction's own
 block tag — never `latest`, because metadata read from a later state describes a different
@@ -199,27 +259,57 @@ process, *after* parsing, mid-report.
 
 ## What it does not do
 
-- **No ABI decoding.** Frames carry the 4-byte selector and nothing else, so
-  *who controls a value* — the question that separates an exploit from an
-  ordinary swap — is deliberately unanswerable here and is not claimed.
-- **No symbols, no prices.** Every token is asked for its `decimals()` at the block the
-  transaction was mined in — a fact the token publishes — so `= 316.820726` is exact, and
-  it is shown *beside* the base amount rather than in place of it. The report does not
-  call `symbol()`, never names a ticker, and prices nothing: a decimal count is a fact
-  about a token, a worth is not. Scaling is display-only; netting and comparison stay on
-  base-unit integers, so a 6-decimal stablecoin is still never added to an 18-decimal one.
-- **No findings, no severity, no price.** There is no ranking of "is this an
-  attack" and no USD figures, so a report cannot imply that a drain was worth more
-  than a transfer because its token had more decimals.
-- **No batching.** JSON-RPC batch requests are refused by real public endpoints
-  (measured against `eth.drpc.org`), and a refused batch reads exactly like "this
-  chain has nothing here". Every request is sequential, so transport problems
-  cannot masquerate as absent evidence.
+Each line says whether the absence is a decision or unfinished work. The difference matters to
+a reader deciding what to trust the report with.
+
+- **No batching — by design.** JSON-RPC batch requests are refused by real public endpoints
+  (measured against `eth.drpc.org`), and a refused batch reads exactly like "this chain has
+  nothing here". Every request is sequential, so transport problems cannot masquerade as absent
+  evidence.
+- **No prices, no ticker names — by design.** Every token is asked for its `decimals()` at the
+  block the transaction was mined in — a number the token publishes and the amount is interpreted
+  with — so `= 316.820726` is exact, and it is shown *beside* the base amount rather than in
+  place of it. A `symbol()` is a self-declared string; an address that moved 316 USDC and one
+  that moved 316 of a token naming itself "USDC" are not the same fact, and no worth is implied
+  either way. Scaling is display-only; netting and comparison stay on base-unit integers, so a
+  6-decimal stablecoin is still never added to an 18-decimal one.
+- **No findings, no severity — by design, for now.** There is no ranking of "is this an attack"
+  and no USD figure, so a report cannot imply that a drain was worth more than a transfer because
+  its token had more decimals. `Exit::Findings` exists in the code and is deliberately
+  unreachable from `run()`.
+- **No ABI decoding — not yet.** Frames carry the 4-byte selector and nothing else, so
+  *who controls a value* — the question that separates an exploit from an ordinary swap — is
+  unanswerable here and is not claimed.
+- **No join between the tree and the receipt logs — by design, and it needs a different
+  collector to change.** That tree has two frames and the transfer it produced is receipt log
+  **293**, so attaching logs to frames by position attributes them to the wrong call. necropsy
+  keeps the two artifacts in separate tables and never joins them.
+
+## Roadmap
+
+Ordered by what each one unblocks, not by ease. None of these is a promise about a version.
+
+1. **Decode calldata past the selector.** Turns `0xa9059cbb` into *which argument moved how much
+   to whom*, which is the difference between a ledger of addresses and a ledger of intent. The
+   constraint it has to satisfy: a resolved name must not decide what a fixture prints, because
+   then a test passes or fails on whether a label lookup happened.
+2. **Attribute logs to the frame that emitted them** — only from a collector that *reports* the
+   pairing (an opcode-level tracer), never inferred from position. Item 1 without this still
+   leaves token movements and calls in different universes.
+3. **Name re-entrancy in the tree as shape.** `Trace::ancestors` already returns the open-frame
+   chain a call re-enters along; a repeated (callee, selector) on that chain is a structural
+   observation with the same standing as the diff — a question, not a verdict.
+4. **`--baseline-from-json`**, so two captured traces can be compared when neither node is still
+   reachable. The offline caveats then have to be compared too, not just the trees.
+5. **A severity model, and only then `Exit::Findings`.** This is the last item on purpose: a
+   finding needs a stated model of what makes one, a denominator to price against, and a way to
+   say "unknown worth" that a caller can act on. Until it exists, the tool is a reader, and a
+   report that reads as a verdict is a bug rather than a feature.
 
 ## Tests
 
 ```sh
-cargo test --all-targets   # 147 library + 3 argument-handling + 13 CLI-contract + 2 fixture tests, all offline
+cargo test --all-targets   # 152 library + 3 argument-handling + 20 CLI-contract + 2 fixture tests, all offline
 cargo clippy --all-targets
 ```
 

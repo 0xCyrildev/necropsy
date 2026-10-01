@@ -194,3 +194,134 @@ fn the_narrative_flag_is_documented() {
         .success()
         .stdout(predicate::str::contains("--narrative"));
 }
+
+// --- --from-json: analysing a captured trace without dialling a node -------------------
+
+/// The committed fixture is a real callTracer response for the transaction the README
+/// documents, so this exercises the offline path against captured data rather than a
+/// hand-written imitation of one.
+fn fixture_path() -> String {
+    format!(
+        "{}/tests/fixtures/usdc-transfer-18214590.calltracer.json",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+#[test]
+fn a_captured_trace_is_reported_as_degraded_because_no_receipt_came_with_it() {
+    // The exit code is the point: an offline trace has no logs and no transaction
+    // metadata, and reporting that as a complete answer (exit 0) is the failure mode
+    // this whole tool exists to avoid.
+    necropsy()
+        .arg("--from-json")
+        .arg(fixture_path())
+        .arg(HASH)
+        .assert()
+        .code(4)
+        .stdout(predicate::str::contains("offline JSON file"))
+        .stdout(predicate::str::contains("no token transfer is known"))
+        // The two places a missing receipt must not be rendered as a measurement.
+        .stdout(predicate::str::contains(
+            "logs none supplied (no receipt came with this file)",
+        ))
+        .stdout(predicate::str::contains(
+            "token movements are unknown, not zero",
+        ))
+        .stdout(predicate::str::contains("log(s) on the receipt").not());
+}
+
+#[test]
+fn a_file_input_refuses_the_node_only_flags() {
+    // Silently ignoring --rpc-url would leave a reader unsure which input was analysed.
+    necropsy()
+        .arg("--from-json")
+        .arg(fixture_path())
+        .arg("--rpc-url")
+        .arg(DEAD)
+        .arg(HASH)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--from-json"));
+}
+
+#[test]
+fn help_does_not_echo_the_endpoint_it_found_in_the_environment() {
+    // `--help` is the most-pasted output a CLI has. An env default printed verbatim turns a
+    // request for usage into a credential disclosure, which is the one rule the report itself
+    // already keeps.
+    necropsy()
+        .env(
+            "ETH_RPC_URL",
+            "https://provider.example/v2/SECRETheader1234",
+        )
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ETH_RPC_URL"))
+        .stdout(predicate::str::contains("SECRETheader1234").not());
+}
+
+#[test]
+fn an_endpoint_left_in_the_environment_does_not_refuse_a_file_input() {
+    // The other half of that rule. `ETH_RPC_URL` is exported by habit by anyone who uses a
+    // node daily — refusing here would make --from-json unusable for exactly the people who
+    // need it, and the workaround ("unset it first") is how a flag gets quietly dropped.
+    // The URL is a dead port, so this passing also proves nothing was dialled.
+    necropsy()
+        .env("ETH_RPC_URL", DEAD)
+        .arg("--from-json")
+        .arg(fixture_path())
+        .arg(HASH)
+        .assert()
+        .code(4)
+        .stdout(predicate::str::contains("offline JSON file"));
+}
+
+#[test]
+fn a_captured_trace_cannot_answer_a_chain_guard() {
+    // Nothing in a bare trace records which chain it came from, so `--chain` has nothing to
+    // check against. The guard must fail closed rather than accept a file that happens to
+    // look like the chain the operator meant.
+    necropsy()
+        .arg("--from-json")
+        .arg(fixture_path())
+        .arg("--chain")
+        .arg("1")
+        .arg(HASH)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("no chain id"))
+        .stderr(predicate::str::contains("--from-json"));
+}
+
+#[test]
+fn a_missing_trace_file_is_a_usage_error_that_names_the_path() {
+    necropsy()
+        .arg("--from-json")
+        .arg("/nonexistent/not-a-trace.json")
+        .arg(HASH)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("/nonexistent/not-a-trace.json"));
+}
+
+#[test]
+fn a_captured_error_response_is_not_read_as_an_empty_trace() {
+    // The dangerous input: a saved "-32603 internal error" parsed as a frame tree would
+    // report a transaction that did nothing.
+    let mut path = std::env::temp_dir();
+    path.push(format!("necropsy-cli-err-{}.json", std::process::id()));
+    std::fs::write(
+        &path,
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}"#,
+    )
+    .expect("temp written");
+    necropsy()
+        .arg("--from-json")
+        .arg(&path)
+        .arg(HASH)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("JSON-RPC error"));
+    let _ = std::fs::remove_file(&path);
+}

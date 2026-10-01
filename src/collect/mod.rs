@@ -11,6 +11,7 @@ pub mod calltracer;
 pub mod castbin;
 pub mod casttext;
 pub mod decimals;
+pub mod offline;
 pub mod receiptlogs;
 pub mod rpc;
 pub mod txdata;
@@ -55,7 +56,17 @@ impl Collection {
             Collector::CastLocalReplay => {
                 "cast local block replay — numbers may diverge from chain"
             }
+            Collector::OfflineFile => {
+                "offline JSON file (no node asked; no receipt, so no token movement is known)"
+            }
         }
+    }
+
+    /// True when the tree came from a file rather than a node. Rendering depends on
+    /// it: "no logs" and "no receipt supplied" are different claims, and collapsing
+    /// them would report an unknown as a zero.
+    pub fn offline(&self) -> bool {
+        matches!(self.trace.provenance.collector, Collector::OfflineFile)
     }
 
     pub fn unclassified(&self) -> usize {
@@ -79,9 +90,9 @@ impl Collection {
     /// price one chain while reading another, which is exactly the mix-up `--chain`
     /// exists to prevent.
     ///
-    /// `at` is a redacted host, used only where the failure is silence — "this endpoint
-    /// would not report a chain id" tells the reader nothing if they cannot tell *which*
-    /// endpoint is being discussed.
+    /// `at` names the source that stayed silent — a redacted host, or the file passed to
+    /// `--from-json`. "would not report a chain id" tells the reader nothing if they cannot
+    /// tell *which* source is being discussed.
     pub fn verify_chain(&self, wanted: u64, at: &str) -> Result<()> {
         match self.trace.provenance.chain_id {
             Some(got) if got == wanted => Ok(()),
@@ -89,10 +100,11 @@ impl Collection {
                 endpoint: got,
                 requested: wanted,
             }),
-            // Silence is not agreement: an endpoint that will not say which chain it is
-            // on cannot honour a guard meant to prevent exactly that mix-up.
+            // Silence is not agreement: a source that will not say which chain it is on
+            // cannot honour a guard meant to prevent exactly that mix-up. A captured trace
+            // is such a source — nothing in the file records a chain id.
             None => Err(Error::Collect(format!(
-                "the endpoint at {at} would not report a chain id, so --chain {wanted} cannot be verified"
+                "{at} reported no chain id, so --chain {wanted} cannot be verified"
             ))),
         }
     }

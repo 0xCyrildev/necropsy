@@ -224,6 +224,9 @@ pub enum Collector {
     /// `cast run` re-executing the block locally. Numbers from this source are
     /// labelled "local replay", because replay can diverge from chain.
     CastLocalReplay,
+    /// Read from a file rather than a node. Nothing was asked of any chain, so the
+    /// receipt, the transaction metadata and the chain id are unknown — and said so.
+    OfflineFile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

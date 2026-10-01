@@ -238,8 +238,13 @@ fn header(c: &Collection, hash: TxHash, out: &mut String) {
                 out,
                 "tx",
                 &format!(
-                    "{} — no transaction returned by this endpoint",
-                    hash.to_hex()
+                    "{} — {}",
+                    hash.to_hex(),
+                    if c.offline() {
+                        "no transaction metadata came with this file"
+                    } else {
+                        "no transaction returned by this endpoint"
+                    }
                 ),
             );
             out.push_str("  from / to / block: unknown, so nothing downstream can be attributed to an origin\n");
@@ -282,12 +287,21 @@ fn accounting(c: &Collection, out: &mut String) {
             "NO — the counts above do not add up; treat this report as suspect"
         }
     ));
-    out.push_str(&format!(
-        "  coverage    logs {} ({} unaccounted) | fungible events {}\n",
-        c.logs.len(),
-        c.unaccounted_logs(),
-        c.events.iter().filter(|e| e.is_fungible_move()).count(),
-    ));
+    // For a captured trace there is no receipt to have contained zero logs. Printing the
+    // count would turn an absent artifact into a measurement — the one move this report is
+    // built to prevent.
+    let coverage = if c.offline() {
+        "  coverage    logs none supplied (no receipt came with this file) | fungible events 0\n"
+            .to_string()
+    } else {
+        format!(
+            "  coverage    logs {} ({} unaccounted) | fungible events {}\n",
+            c.logs.len(),
+            c.unaccounted_logs(),
+            c.events.iter().filter(|e| e.is_fungible_move()).count(),
+        )
+    };
+    out.push_str(&coverage);
     if let Some(u) = t.unclassified.first() {
         out.push_str(&format!(
             "  first unclassified input: {}\n",
@@ -597,6 +611,13 @@ fn narrative_line(
 fn events(c: &Collection, out: &mut String) {
     out.push_str("\nReceipt logs — a separate table, deliberately not joined to the tree\n");
     if c.events.is_empty() {
+        // A file input has no receipt to have produced zero logs. Saying "0 logs" would
+        // turn an absent artifact into a measurement, which is the error this whole table
+        // exists to avoid making.
+        if c.offline() {
+            out.push_str("  (no receipt was supplied with this trace — token movements are unknown, not zero)\n");
+            return;
+        }
         out.push_str(&format!(
             "  (no classifiable events; {} log(s) on the receipt)\n",
             c.logs.len()

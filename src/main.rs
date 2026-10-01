@@ -7,7 +7,8 @@
 //! Exit statuses are the contract with scripts (`necropsy::exit`): a run that
 //! could not read anything must not look like a run that found nothing.
 
-use clap::{Parser, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use necropsy::collect::castbin::{self, CastMode};
 use necropsy::collect::decimals::Decimals;
 use necropsy::collect::rpc::HttpRpc;
@@ -39,8 +40,10 @@ struct Args {
     #[arg(long, value_name = "URL", requires = "baseline_tx_hash")]
     baseline_rpc_url: Option<String>,
 
-    /// JSON-RPC endpoint. Falls back to ETH_RPC_URL.
-    #[arg(long, env = "ETH_RPC_URL")]
+    /// JSON-RPC endpoint. Falls back to ETH_RPC_URL. The value is deliberately not echoed
+    /// in `--help`: clap prints an env default verbatim, and a provider URL is a credential
+    /// — `--help` is the one output people paste into an issue or a chat window.
+    #[arg(long, env = "ETH_RPC_URL", hide_env_values = true)]
     rpc_url: Option<String>,
 
     /// Refuse to analyze unless the endpoint agrees this is the chain you mean.
@@ -56,6 +59,16 @@ struct Args {
     /// locally. Replay needs archive state and can diverge from what chain did.
     #[arg(long, value_enum, default_value = "rendered")]
     cast_mode: CastModeArg,
+
+    /// Analyse a captured `callTracer` response from a file instead of dialling a node.
+    /// Accepts the bare frame object or a JSON-RPC envelope. Such a file holds no receipt,
+    /// so no token movement is known and the run exits 4 (degraded): a smaller answer is
+    /// reported as smaller, never as a complete one. An `ETH_RPC_URL` left in the
+    /// environment is ignored; `--rpc-url` typed beside this is refused, because a run has
+    /// one source.
+    #[arg(long, value_name = "PATH",
+          conflicts_with_all = ["collector", "baseline_tx_hash", "baseline_rpc_url"])]
+    from_json: Option<String>,
 
     /// Emit the machine-readable report instead of the text one.
     #[arg(long)]
@@ -119,8 +132,16 @@ impl From<CastModeArg> for CastMode {
 }
 
 fn main() -> std::process::ExitCode {
-    let args = Args::parse();
-    match run(&args) {
+    // Matches are taken directly, not through `Args::parse`, because one question below
+    // cannot be answered from the parsed struct: whether `--rpc-url` was *typed* or merely
+    // picked up from `ETH_RPC_URL`. Only the typed form contradicts `--from-json`.
+    let cmd = Args::command();
+    let matches = cmd
+        .try_get_matches_from(std::env::args_os())
+        .unwrap_or_else(|e| e.exit());
+    let endpoint_named = matches.value_source("rpc_url") == Some(ValueSource::CommandLine);
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    match run(&args, endpoint_named) {
         Ok((body, status)) => {
             println!("{body}");
             status.into()
@@ -132,16 +153,7 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run(args: &Args) -> Result<(String, Exit)> {
-    // An empty `ETH_RPC_URL` is set-but-blank, which is how CI often "unset" a
-    // variable. clap hands it over as a value, so without this the run would dial
-    // an empty URL and fail as an unreachable endpoint rather than as unconfigured.
-    let url = args
-        .rpc_url
-        .clone()
-        .map(|u| u.trim().to_string())
-        .filter(|u| !u.is_empty())
-        .ok_or(Error::NoRpcUrl)?;
+fn run(args: &Args, endpoint_named: bool) -> Result<(String, Exit)> {
     let hash = necropsy::collect::txdata::parse_tx_hash(&args.tx)?;
     // Parsed up front, with the target: a typo in the *second* hash should cost a
     // usage error immediately, not a transaction fetch that then gets thrown away.
@@ -153,40 +165,79 @@ fn run(args: &Args) -> Result<(String, Exit)> {
 
     let timeout = Duration::from_secs(args.timeout.max(1));
     let mode = args.cast_mode.into();
-    let (rpc, cast_cfg) = endpoint(&url, timeout, mode);
 
-    // A second endpoint is opt-in. Without it the baseline is read from the same node,
-    // and `--chain` stays the single guard it was. Set-but-blank applies here too: an
-    // empty value means "same as --rpc-url", not "dial the empty string".
-    let baseline_url = args
-        .baseline_rpc_url
-        .clone()
-        .map(|u| u.trim().to_string())
-        .filter(|u| !u.is_empty())
-        .unwrap_or_else(|| url.clone());
+    // Either a node is dialled or a file is read. clap refuses the node-only flags
+    // alongside --from-json; an endpoint named on the command line is refused here, because
+    // it says "dial" in the same breath as "read this file". `ETH_RPC_URL` does not: that is
+    // configuration left in the environment, not an instruction about this transaction.
+    if endpoint_named {
+        if let Some(path) = args.from_json.as_deref() {
+            return Err(Error::MixedSource {
+                path: path.to_string(),
+            });
+        }
+    }
+    let node = if args.from_json.is_some() {
+        None
+    } else {
+        // An empty `ETH_RPC_URL` is set-but-blank, which is how CI often "unset" a
+        // variable. clap hands it over as a value, so without this the run would dial
+        // an empty URL and fail as an unreachable endpoint rather than as unconfigured.
+        let url = args
+            .rpc_url
+            .clone()
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+            .ok_or(Error::NoRpcUrl)?;
+        // A second endpoint is opt-in. Without it the baseline is read from the same
+        // node, and `--chain` stays the single guard it was. Set-but-blank applies here
+        // too: an empty value means "same as --rpc-url", not "dial the empty string".
+        let baseline_url = args
+            .baseline_rpc_url
+            .clone()
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| url.clone());
+        let (rpc, cast_cfg) = endpoint(&url, timeout, mode);
+        Some(Node {
+            url,
+            rpc,
+            cast_cfg,
+            baseline_url,
+        })
+    };
 
-    let c = collect::collect(
-        rpc.clone(),
-        hash,
-        args.collector.into(),
-        Some(cast_cfg.clone()),
-    )?;
+    let c = match (&node, args.from_json.as_deref()) {
+        (Some(n), _) => collect::collect(
+            n.rpc.clone(),
+            hash,
+            args.collector.into(),
+            Some(n.cast_cfg.clone()),
+        )?,
+        (None, Some(path)) => collect::offline::collection_from_json(path)?,
+        (None, None) => return Err(Error::NoRpcUrl),
+    };
     let l = ledger::build(&c.events, &c.trace, c.tx.as_ref().and_then(|m| m.status));
 
     if let Some(wanted) = args.chain {
-        c.verify_chain(wanted, &rpc.describe())?;
+        let at = match &node {
+            Some(n) => n.rpc.describe(),
+            // A file is the thing that would not say which chain it came from.
+            None => "the file passed to --from-json".to_string(),
+        };
+        c.verify_chain(wanted, &at)?;
     }
 
     // Read the baseline *after* the target's chain guard, so an endpoint on the wrong
     // chain cannot spend a second request before the run stops. Two separate calls,
     // never a batch: these endpoints refuse batches whose members each work alone, and a
     // refusal would read exactly like a transaction that does not exist.
-    let comparison = match baseline_hash {
-        Some(bhash) => {
-            let (brpc, bcast) = if baseline_url == url {
-                (rpc.clone(), cast_cfg.clone())
+    let comparison = match (baseline_hash, &node) {
+        (Some(bhash), Some(n)) => {
+            let (brpc, bcast) = if n.baseline_url == n.url {
+                (n.rpc.clone(), n.cast_cfg.clone())
             } else {
-                endpoint(&baseline_url, timeout, mode)
+                endpoint(&n.baseline_url, timeout, mode)
             };
             let baseline =
                 collect::collect(brpc.clone(), bhash, args.collector.into(), Some(bcast))?;
@@ -197,27 +248,38 @@ fn run(args: &Args) -> Result<(String, Exit)> {
             }
             Some(necropsy::diff::compare(bhash, hash, &baseline, &c))
         }
-        None => None,
+        _ => None,
     };
 
-    // Asked last, once every guard has passed: the ledger is what says which assets are
-    // worth asking about, and a run that stops on a wrong chain should not have spent
-    // token calls on the way.
-    let decimals = if args.no_decimals {
-        Decimals::unscaled(
-            "--no-decimals was given, so amounts stay in base units and no token was asked",
-        )
-    } else {
-        collect::decimals::fetch(
-            &*rpc,
+    // Asked last, once every guard has passed: the ledger says which assets are worth
+    // asking about, and a run that stops on a wrong chain should not have spent token
+    // calls on the way. Both ways of not asking are reported as their own reason, so a
+    // file input never reads as an operator who declined, or a decline as a node refusing.
+    let asked_decimals = node.is_some() && !args.no_decimals;
+    let decimals = match (&node, args.no_decimals, args.from_json.as_deref()) {
+        (Some(n), false, _) => collect::decimals::fetch(
+            &*n.rpc,
             &l.assets(),
             c.tx.as_ref().map(|m| m.block_tag()).as_deref(),
-        )
+        ),
+        // Each way of not asking gets its own sentence. A file input must not read as an
+        // operator who declined, and a decline must not read as a node that refused.
+        (None, _, Some(_)) => Decimals::unscaled(
+            "--from-json supplied a trace with no node to ask, so no token's decimals() was fetched"
+                .to_string(),
+        ),
+        (_, true, _) => Decimals::unscaled(
+            "--no-decimals was given, so amounts stay in base units and no token was asked"
+                .to_string(),
+        ),
+        (None, false, None) => Decimals::unscaled(
+            "no endpoint was configured, so no token was asked".to_string(),
+        ),
     };
 
     let body = if args.json {
         report::Report::build(&c, &l, hash)
-            .with_decimals((!args.no_decimals).then_some(&decimals))
+            .with_decimals(asked_decimals.then_some(&decimals))
             .with_diff(comparison.as_ref())
             .to_json()?
     } else {
@@ -243,6 +305,15 @@ fn run(args: &Args) -> Result<(String, Exit)> {
     };
 
     Ok((body, status))
+}
+
+/// The node side of a run: the endpoint dialled for the target, and the second
+/// endpoint if one was named. Absent entirely when the trace came from a file.
+struct Node {
+    url: String,
+    rpc: collect::SharedRpc,
+    cast_cfg: castbin::CastConfig,
+    baseline_url: String,
 }
 
 /// One endpoint: an RPC handle, plus the `cast` configuration that makes `auto`'s
