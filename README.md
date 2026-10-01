@@ -435,13 +435,13 @@ downloads one checksum-verified Foundry release tarball, pinned to 1.8.1, refuse
 mismatch and puts `cast` on `PATH` — no pipe-to-shell, and no third-party install script on a
 timer.
 
-It also declares a daily schedule (`17 6 * * *`), which is **configured and verified by dispatch,
-not yet by an actual scheduled run** — GitHub has fired it zero times as of 2026-10-01, while
-manual dispatches have run five times green. The distinction is written down because "it runs daily"
-is exactly the sort of claim that survives an unexamined config: a workflow can be active, valid and
-scheduled and still not have been triggered once. Re-check `gh api
-repos/0xCyrildev/necropsy/actions/runs?event=schedule --jq .total_count` after the next window before
-believing that half of this sentence.
+It also declares a daily schedule (`17 6 * * *`), and that half is worth stating precisely: GitHub's
+scheduler is best-effort. The first fire arrived at 13:25 UTC for a 06:17 UTC cron — seven hours
+late, and the run itself passed. Before that it had never fired at all, which is how "it runs daily"
+nearly became a claim nobody checked: a workflow can be active, valid and scheduled and still not
+have been triggered, and the API reports that as an empty list rather than an error. `gh api
+repos/0xCyrildev/necropsy/actions/runs?event=schedule --jq '.workflow_runs[0].created_at'` is the
+question to ask rather than assuming either direction.
 
 ## Releases
 
