@@ -9,6 +9,22 @@ repository = "https://github.com/0xCyrildev/necropsy"
 readme = "README.md"
 keywords = ["ethereum", "forensics", "evm", "incident-response"]
 categories = ["command-line-utilities"]
+# A whitelist, not an exclude list. The repository also holds the npm packages, the packaging
+# scripts and the CI workflows, and none of them belong in a crate tarball — but the real reason to
+# list what ships is that `cargo publish` verifies the package it built *compiles on its own*. If a
+# source file were missing from that set, the publish would fail loudly here rather than quietly
+# handing someone a crate that cannot build.
+include = [
+  "src/**",
+  "tests/fixtures/**",
+  "tests/*.rs",
+  "examples/*.rs",
+  "Cargo.lock",
+  "LICENSE",
+  "README.md",
+  "CHANGELOG.md",
+  "SECURITY.md",
+]
 
 [[bin]]
 name = "necropsy"
