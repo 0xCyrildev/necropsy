@@ -144,7 +144,7 @@ impl TxMeta {
     }
 }
 
-/// Parse a hash the way the CLI does, so `--from-json` and the flag share one
+/// Parse a hash the way the CLI does, so every entry point shares one
 /// rule instead of two that can drift.
 pub fn parse_tx_hash(s: &str) -> Result<TxHash> {
     TxHash::from_str(s).map_err(|e| Error::BadTxHash {

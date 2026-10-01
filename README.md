@@ -219,14 +219,18 @@ process, *after* parsing, mid-report.
 ## Tests
 
 ```sh
-cargo test --all-targets   # 147 library + 3 argument-handling + 13 CLI-contract, all offline
+cargo test --all-targets   # 147 library + 3 argument-handling + 13 CLI-contract + 2 fixture tests, all offline
 cargo clippy --all-targets
 ```
 
 The suite is hermetic: it runs against committed trace fixtures and a
-`MemoryRpc`, so it never needs a node. That also means it cannot see a transport
-failure or a node that stopped exposing `debug_` — `examples/live_collect.rs`
-exists for that, and prints what the pipeline actually accounted for:
+`MemoryRpc`, so it never needs a node. `tests/fixtures/` holds a real `callTracer`
+response and receipt captured once from public mainnet — two frames in the tree, one
+log, and that log's global index is 293 — so the rule that the two sequences share no
+position is checked against data rather than asserted in prose. `tests/live.rs` and
+`examples/live_collect.rs` cover what a hermetic suite structurally cannot — the example
+renders through `report`, so it exercises the shipped path and prints what the pipeline
+accounted for:
 
 ```sh
 ETH_RPC_URL=https://eth.drpc.org cargo run --example live_collect -- 0x<tx hash>

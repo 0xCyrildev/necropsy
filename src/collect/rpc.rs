@@ -128,7 +128,7 @@ impl UnwrapElsePlaceholder for Option<String> {
     }
 }
 
-/// An RPC backed by canned answers: what the offline suites and `--from-json`
+/// An RPC backed by canned answers: what the offline suites
 /// use, and the reason no test in this crate can touch the network by accident.
 pub struct MemoryRpc {
     responses: Vec<(String, Value)>,
