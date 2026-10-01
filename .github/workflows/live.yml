@@ -27,10 +27,13 @@ env:
 
 jobs:
   contract:
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: GitHub is moving that label to Ubuntu 26 on 2026-10-19, and the
+    # live job parses real RPC answers with curl and python3. A runner image swap should not be the
+    # reason a contract check goes red -- or, worse, silently changes what it sees.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # A red run is only actionable if it also records whether the node was answering at all. This
       # distinguishes "necropsy regressed" from "the endpoint moved" without anyone re-running by hand.

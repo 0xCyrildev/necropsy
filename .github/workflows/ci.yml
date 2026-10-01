@@ -10,9 +10,12 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: GitHub is moving that label to Ubuntu 26 on 2026-10-19, and the
+    # live job parses real RPC answers with curl and python3. A runner image swap should not be the
+    # reason a contract check goes red -- or, worse, silently changes what it sees.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # rustup and a stable toolchain are preinstalled on the runner image; no
       # third-party action is needed to pin the version, and Cargo.toml's
