@@ -3,6 +3,7 @@
 // pack the tarballs npm would publish.
 //
 // Usage: node scripts/pack-npm.mjs <distDir> [--publish-dry-run]
+// <distDir> may be relative to the repository or absolute.
 //
 // The verification step is the point of the script rather than the file copying: a release asset
 // named `…-aarch64-…` that actually contains an x86_64 binary is a packaging mistake nobody
@@ -11,7 +12,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TARGETS, CLI_PACKAGE } from "./targets.mjs";
 
@@ -23,13 +24,14 @@ if (!dist) {
 }
 const dry = process.argv.includes("--publish-dry-run");
 
+const distDir = resolve(dist);
 const version = readFileSync(join(ROOT, "Cargo.toml"), "utf8").match(/^version = "([^"]+)"$/m)[1];
 const perTarget = new Map();
 let skipped = 0;
 
 for (const t of TARGETS) {
   const exeName = t.os === "windows" ? "necropsy.exe" : "necropsy";
-  const asset = join(ROOT, dist, `necropsy-${t.cargoTarget}`);
+  const asset = join(distDir, `necropsy-${t.cargoTarget}`);
   if (!existsSync(asset)) {
     console.error(`MISSING   ${asset}`);
     process.exit(1);
@@ -53,6 +55,32 @@ for (const t of TARGETS) {
 
 // The launcher package: no binary, so nothing to verify beyond that the manifest is current.
 copyFileSync(join(ROOT, "LICENSE"), join(ROOT, "npm", "cli", "LICENSE"));
+writeFileSync(
+  join(ROOT, "npm", "cli", "README.md"),
+  `# ${CLI_PACKAGE}
+
+The [necropsy](https://github.com/0xCyrildev/necropsy) command line: post-transaction forensics for
+EVM chains — reconstruct the call tree, classify the receipt logs, rank where value ended up.
+
+\`\`\`sh
+npm install -g ${CLI_PACKAGE}
+necropsy --rpc-url "$ETH_RPC_URL" 0x5b515946dc1177149f140777ac90879312b182117e3392e8e2703ed3cd697153
+\`\`\`
+
+This package holds a launcher and nothing else. The binary comes from one of the platform packages
+listed in its \`optionalDependencies\`, selected by npm from their \`os\`/\`cpu\` fields, so
+\`npm install\` contacts the registry and no other host — there is no \`postinstall\` and no download
+of release assets.
+
+Run \`necropsy --build-info\` after installing to see the version, the \`--json\` schema version, and
+the platform the binary reports running on.
+
+Linux x86_64 (glibc and musl), Linux arm64, macOS arm64 and macOS x86_64 are published. Windows is
+not, and that is a statement about what has been verified, not an omission.
+
+License: MIT.
+`,
+);
 
 if (dry) {
   for (const dir of ["cli", ...TARGETS.map((t) => t.dir)]) {

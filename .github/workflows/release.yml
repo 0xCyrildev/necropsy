@@ -173,7 +173,10 @@ jobs:
           set -euo pipefail
           mkdir -p dist assets
           mv dl/*.tar.gz dl/*.tar.gz.sha256 assets/
-          cat dl/*.tar.gz.sha256 | sort > assets/SHA256SUMS.txt
+          # Read them where they are now. The first version of this line cat'd dl/*.sha256 after
+          # the mv above had already emptied that directory, so the manifest came out short and
+          # the count check failed for the wrong reason.
+          cat assets/*.tar.gz.sha256 | sort > assets/SHA256SUMS.txt
           # Counted from scripts/targets.mjs, not hardcoded: the day a target is added, this check
           # still means "every target produced an asset".
           expected=$(node -e 'import("./scripts/targets.mjs").then(m => console.log(m.TARGETS.length))')
