@@ -6,14 +6,28 @@ bump may rename a `--json` field, and a patch bump may not.
 
 ## What is released
 
-Nothing. `0.2.0` is the version in `Cargo.toml`, but no tag and no GitHub release exist, so
-there is no artifact to depend on. Everything below describes `master`, and "Unreleased" is the
-honest heading for all of it until a tag exists.
+`v0.2.0` is the first tag, so it is the first artifact: five platform binaries, one checksum
+manifest, six npm tarballs, all attached to the GitHub Release and built by the pipeline described
+in `RELEASE.md`. Nothing before this existed as anything but source.
 
-## Unreleased
+## 0.2.0 — 2026-10-01
 
 ### Added
 
+- `--build-info` — the version, the `--json` schema version, and the `os`/`arch` the *running binary*
+  reports. A packager needs a claim the artifact cannot fake; `--version` is a string the build
+  system wrote.
+- npm distribution under `@0xcyrildev`: a launcher plus one package per platform, selected by npm's
+  `os`/`cpu` fields. No `postinstall`, and no download at install time. Linux x86_64 (glibc and
+  musl), Linux arm64, macOS arm64 and macOS x86_64. **No Windows package** — nothing in this tree has
+  ever run there, and an unverified binary would be a claim rather than a feature.
+- Release pipeline: `v*` tags build every target, verify each asset against the target its name
+  claims (ELF/Mach-O header, plus execution directly or under qemu), stage it as a byte-reproducible
+  `.tar.gz`, checksum into one `SHA256SUMS.txt`, and publish a GitHub Release. A
+  `workflow_dispatch` runs the same pipeline and publishes nothing, so the first execution of it is
+  never the release itself.
+- `scripts/targets.mjs` is the single list of platforms; the CI matrix, the npm manifests and the
+  packaging script all read it, so they cannot drift.
 - `--from-json <PATH>` — analyse a captured `callTracer` response (bare frame object or
   JSON-RPC envelope) without dialling a node. Exits 4, because a file carries no receipt and no
   transaction metadata, and the report names both absences instead of printing zeros.

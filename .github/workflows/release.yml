@@ -149,7 +149,7 @@ jobs:
           cp LICENSE README.md stage/
           ls -l stage
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: assets-${{ matrix.dir }}
           path: stage/
@@ -162,7 +162,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: assets-*
           path: dl
@@ -207,7 +207,7 @@ jobs:
           (cd assets && find . -maxdepth 1 -name '*.tgz' -print0 | xargs -0 sha256sum >> SHA256SUMS.txt && sort -o SHA256SUMS.txt SHA256SUMS.txt && sha256sum -c SHA256SUMS.txt)
           ls -l assets
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-${{ needs.plan.outputs.version }}
           path: assets/
@@ -220,7 +220,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-${{ needs.plan.outputs.version }}
           path: assets
